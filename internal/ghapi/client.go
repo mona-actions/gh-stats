@@ -18,6 +18,27 @@ import (
 	"github.com/pterm/pterm"
 )
 
+// BuildGHCommand constructs a gh CLI command with the proper hostname flag for GHES support.
+// It inserts the --hostname flag right after "gh" and before other arguments.
+//
+// Example:
+//
+//	BuildGHCommand(ctx, "api", "repos/org/repo") -> ["gh", "--hostname", "ghes.example.com", "api", "repos/org/repo"]
+//	BuildGHCommand(ctx, "api", "repos/org/repo") -> ["gh", "api", "repos/org/repo"] (when hostname is empty)
+func BuildGHCommand(ctx context.Context, args ...string) *exec.Cmd {
+	hostname := state.Get().GetHostname()
+
+	if hostname != "" {
+		// Insert --hostname flag after "gh" command
+		fullArgs := make([]string, 0, len(args)+2)
+		fullArgs = append(fullArgs, "--hostname", hostname)
+		fullArgs = append(fullArgs, args...)
+		return exec.CommandContext(ctx, "gh", fullArgs...)
+	}
+
+	return exec.CommandContext(ctx, "gh", args...)
+}
+
 // Package types supported by GitHub.
 const (
 	PackageTypeContainer = "container"
@@ -178,7 +199,7 @@ func getCountFromLinkHeader(ctx context.Context, endpoint string) (int, error) {
 			}
 		}
 
-		cmd := exec.CommandContext(ctx, "gh", "api", "--include", endpoint)
+		cmd := BuildGHCommand(ctx, "api", "--include", endpoint)
 		cmd.Env = os.Environ()
 
 		var stdout, stderr bytes.Buffer
@@ -373,7 +394,7 @@ func executeGraphQLPage(ctx context.Context, query string, variables map[string]
 			args = append(args, "-f", fmt.Sprintf("endCursor=%s", endCursor))
 		}
 
-		cmd := exec.CommandContext(ctx, "gh", args...)
+		cmd := BuildGHCommand(ctx, args...)
 		cmd.Env = os.Environ()
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
@@ -485,7 +506,7 @@ func RunRESTCallback(ctx context.Context, endpoint string, callback func([]byte)
 			}
 		}
 
-		cmd := exec.CommandContext(ctx, "gh", "api", "--paginate", endpoint)
+		cmd := BuildGHCommand(ctx, "api", "--paginate", endpoint)
 		cmd.Env = os.Environ()
 
 		var stdout, stderr bytes.Buffer
@@ -582,7 +603,7 @@ func parseRESTResponse(response, endpoint string, verbose bool) ([]PackageRespon
 
 // executeRESTPaginatedCall executes a REST API call with retries
 func executeRESTPaginatedCall(ctx context.Context, endpoint string, verbose bool, attempt int) ([]PackageResponse, int, error) {
-	cmd := exec.CommandContext(ctx, "gh", "api", "--paginate", "--include", endpoint)
+	cmd := BuildGHCommand(ctx, "api", "--paginate", "--include", endpoint)
 	cmd.Env = os.Environ()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -957,7 +978,7 @@ func GetOrgPackageDataWithResume(ctx context.Context, org string, progress *pter
 
 // GetRateLimit fetches the current GitHub API rate limit information
 func GetRateLimit() (*RateLimitResponse, error) {
-	cmd := exec.CommandContext(context.Background(), "gh", "api", "rate_limit")
+	cmd := BuildGHCommand(context.Background(), "api", "rate_limit")
 	cmd.Env = os.Environ()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

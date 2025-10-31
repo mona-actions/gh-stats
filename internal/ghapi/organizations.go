@@ -15,7 +15,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -236,7 +235,7 @@ func fetchTeamsPage(ctx context.Context, org string, teamsCursor *string, teamsP
 	query := buildTeamsQuery(teamsCursor)
 	args := buildTeamsQueryArgs(query, org, teamsCursor)
 
-	cmd := exec.CommandContext(ctx, "gh", args...)
+	cmd := BuildGHCommand(ctx, args...)
 	cmd.Env = os.Environ()
 
 	var out, errOut bytes.Buffer
@@ -426,7 +425,7 @@ func fetchTeamRepositories(ctx context.Context, org, teamName, teamSlug, cursor 
 			}
 		}`
 
-		cmd := exec.CommandContext(ctx, "gh", "api", "graphql",
+		cmd := BuildGHCommand(ctx, "api", "graphql",
 			"-f", fmt.Sprintf("query=%s", query),
 			"-f", fmt.Sprintf("org=%s", org),
 			"-f", fmt.Sprintf("teamSlug=%s", teamSlug),
@@ -501,7 +500,7 @@ func fetchOrgDetails(ctx context.Context, org string) (output.OrgMetadata, error
 		return output.OrgMetadata{}, fmt.Errorf("rate limit check failed: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/orgs/%s", org))
+	cmd := BuildGHCommand(ctx, "api", fmt.Sprintf("/orgs/%s", org))
 	outputBytes, err := cmd.Output()
 	if err != nil {
 		return output.OrgMetadata{}, fmt.Errorf("failed to fetch org details: %w", err)
@@ -580,7 +579,7 @@ func fetchSecurityManagers(ctx context.Context, org string, verbose bool) ([]out
 		return nil, fmt.Errorf("rate limit check failed: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/orgs/%s/security-managers", org), "--paginate")
+	cmd := BuildGHCommand(ctx, "api", fmt.Sprintf("/orgs/%s/security-managers", org), "--paginate")
 	outputBytes, err := cmd.Output()
 	if err != nil {
 		// This might fail if the feature isn't available, that's okay
@@ -619,7 +618,7 @@ func fetchCustomProperties(ctx context.Context, org string, verbose bool) ([]out
 		return nil, fmt.Errorf("rate limit check failed: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/orgs/%s/properties/schema", org))
+	cmd := BuildGHCommand(ctx, "api", fmt.Sprintf("/orgs/%s/properties/schema", org))
 	outputBytes, err := cmd.Output()
 	if err != nil {
 		// Feature may not be available
@@ -664,7 +663,7 @@ func fetchOrganizationRolesCount(ctx context.Context, org string) (int, error) {
 		return 0, fmt.Errorf("rate limit check failed: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/orgs/%s/organization-roles", org))
+	cmd := BuildGHCommand(ctx, "api", fmt.Sprintf("/orgs/%s/organization-roles", org))
 	outputBytes, err := cmd.Output()
 	if err != nil {
 		// Feature may not be available
@@ -700,7 +699,7 @@ func fetchTeamsCount(ctx context.Context, org string) (int, error) {
 		return 0, fmt.Errorf("rate limit check failed: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/orgs/%s/teams?per_page=1", org), "--paginate")
+	cmd := BuildGHCommand(ctx, "api", fmt.Sprintf("/orgs/%s/teams?per_page=1", org), "--paginate")
 	outputBytes, err := cmd.Output()
 	if err != nil {
 		return 0, fmt.Errorf("failed to fetch teams count: %w", err)
@@ -723,7 +722,7 @@ func fetchOrgWebhooks(ctx context.Context, org string, verbose bool) ([]output.W
 		return nil, fmt.Errorf("rate limit check failed: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/orgs/%s/hooks", org), "--paginate")
+	cmd := BuildGHCommand(ctx, "api", fmt.Sprintf("/orgs/%s/hooks", org), "--paginate")
 	cmd.Env = os.Environ()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -787,7 +786,7 @@ func fetchActionsSecrets(ctx context.Context, org string, verbose bool) ([]outpu
 		return nil, fmt.Errorf("rate limit check failed: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/orgs/%s/actions/secrets", org), "--paginate")
+	cmd := BuildGHCommand(ctx, "api", fmt.Sprintf("/orgs/%s/actions/secrets", org), "--paginate")
 	outputBytes, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch Actions secrets: %w", err)
@@ -829,7 +828,7 @@ func fetchActionsVariables(ctx context.Context, org string, verbose bool) ([]out
 		return nil, fmt.Errorf("rate limit check failed: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/orgs/%s/actions/variables", org), "--paginate")
+	cmd := BuildGHCommand(ctx, "api", fmt.Sprintf("/orgs/%s/actions/variables", org), "--paginate")
 	outputBytes, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch Actions variables: %w", err)
@@ -873,7 +872,7 @@ func fetchOrgRulesets(ctx context.Context, org string, verbose bool) ([]output.R
 		return nil, fmt.Errorf("rate limit check failed: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/orgs/%s/rulesets", org), "--paginate")
+	cmd := BuildGHCommand(ctx, "api", fmt.Sprintf("/orgs/%s/rulesets", org), "--paginate")
 	outputBytes, err := cmd.Output()
 	if err != nil {
 		// Rulesets may not be available
@@ -952,7 +951,7 @@ func fetchRunnersCount(ctx context.Context, org string) (int, error) {
 		return 0, fmt.Errorf("rate limit check failed: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/orgs/%s/actions/runners?per_page=1", org), "--paginate")
+	cmd := BuildGHCommand(ctx, "api", fmt.Sprintf("/orgs/%s/actions/runners?per_page=1", org), "--paginate")
 	outputBytes, err := cmd.Output()
 	if err != nil {
 		return 0, fmt.Errorf("failed to fetch runners count: %w", err)
@@ -977,7 +976,7 @@ func fetchBlockedUsers(ctx context.Context, org string) ([]output.BlockedUser, e
 		return nil, fmt.Errorf("rate limit check failed: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "gh", "api", "--paginate", fmt.Sprintf("/orgs/%s/blocks", org))
+	cmd := BuildGHCommand(ctx, "api", "--paginate", fmt.Sprintf("/orgs/%s/blocks", org))
 	cmd.Env = os.Environ()
 
 	var out bytes.Buffer
@@ -1025,7 +1024,7 @@ func fetchGitHubAppsCount(ctx context.Context, org string) (int, error) {
 		return 0, fmt.Errorf("rate limit check failed: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/orgs/%s/installations", org), "--paginate")
+	cmd := BuildGHCommand(ctx, "api", fmt.Sprintf("/orgs/%s/installations", org), "--paginate")
 	cmd.Env = os.Environ()
 
 	var out bytes.Buffer
@@ -1140,7 +1139,7 @@ func retryPackageFetch(ctx context.Context, org, packageType string, pageNum, ma
 			}
 		}
 
-		cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/orgs/%s/packages?package_type=%s&per_page=100&page=%d", org, packageType, pageNum))
+		cmd := BuildGHCommand(ctx, "api", fmt.Sprintf("/orgs/%s/packages?package_type=%s&per_page=100&page=%d", org, packageType, pageNum))
 		cmd.Env = os.Environ()
 
 		var out bytes.Buffer

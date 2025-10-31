@@ -22,6 +22,7 @@ var (
 	resume     bool
 	dryRun     bool
 	noPackages bool
+	hostname   string
 	// Feature flags to control which data to fetch
 	noSettings     bool
 	noCustomProps  bool
@@ -54,6 +55,7 @@ Examples:
   gh stats run --org mona-actions -w 5 -v         # Enable verbose with 5 workers
   gh stats run --org mona-actions -O custom.json  # Use custom output file
   gh stats run --org mona-actions --no-packages   # Skip package scanning (faster)
+  gh stats run --org myorg --hostname github.company.com  # Use with GitHub Enterprise Server
   
 The tool automatically resumes from existing output files, skipping already processed repos.
   
@@ -75,6 +77,7 @@ Use --no-* flags to reduce API usage (see Data Collection Flags below).`,
 			Resume:     resume,
 			DryRun:     dryRun,
 			NoPackages: noPackages,
+			Hostname:   hostname,
 			// Feature flags (default to true, disabled by --no-* flags)
 			FetchSettings:     !noSettings,
 			FetchCustomProps:  !noCustomProps,
@@ -159,6 +162,7 @@ General Flags:
   -v, --verbose           Enable verbose output
   -r, --resume            Resume from existing output file, skipping already processed repositories
       --dry-run           Show what would be collected without making API calls (preview mode)
+      --hostname string   GitHub Enterprise Server hostname (e.g., github.company.com)
   -h, --help              help for run
 
 Data Collection Flags (--no-* to disable and reduce API usage):
@@ -202,6 +206,7 @@ Use "{{.CommandPath}} [command] --help" for more information about a command.{{e
 	runCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose output")
 	runCmd.Flags().BoolVarP(&resume, "resume", "r", false, "Resume from existing output file, skipping already processed repositories")
 	runCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be collected without making API calls (preview mode)")
+	runCmd.Flags().StringVar(&hostname, "hostname", "", "GitHub Enterprise Server hostname (e.g., github.company.com)")
 	runCmd.Flags().BoolVar(&noPackages, "no-packages", false, "Skip fetching package data (faster execution)")
 
 	// Feature flags to control API usage - disable expensive operations

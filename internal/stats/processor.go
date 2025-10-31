@@ -61,6 +61,7 @@ type Config struct {
 	Resume     bool   // Resume from existing output file, skipping already processed repositories
 	DryRun     bool   // Show what would be collected without making API calls (preview mode)
 	NoPackages bool   // Skip fetching package data for faster execution
+	Hostname   string // GitHub Enterprise Server hostname (e.g., github.company.com)
 
 	// Feature flags to control which data to fetch (reduces API calls)
 	FetchSettings     bool // Fetch additional repo settings (default: true)
@@ -254,6 +255,9 @@ func RunWithContext(ctx context.Context, config Config) error {
 	if err := setupAndValidate(&config); err != nil {
 		return err
 	}
+
+	// Set the hostname for GHES support
+	state.Get().SetHostname(config.Hostname)
 
 	if config.DryRun {
 		return runDryRun(config)

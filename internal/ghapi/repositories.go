@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -273,7 +272,7 @@ func GetEnhancedRepoData(ctx context.Context, org, repo string, teamAccessMap ma
 func fetchRepoSettings(ctx context.Context, org, repo string, stats *output.RepoStats) error {
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s", org, repo))
+	cmd := BuildGHCommand(ctx, "api", fmt.Sprintf("/repos/%s/%s", org, repo))
 	cmd.Env = os.Environ()
 
 	var out bytes.Buffer
@@ -363,7 +362,7 @@ func fetchTeamAccess(ctx context.Context, org, repo string, stats *output.RepoSt
 func fetchCustomPropertiesForRepo(ctx context.Context, org, repo string, stats *output.RepoStats) error {
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/properties/values", org, repo))
+	cmd := BuildGHCommand(ctx, "api", fmt.Sprintf("/repos/%s/%s/properties/values", org, repo))
 	cmd.Env = os.Environ()
 
 	var out bytes.Buffer
@@ -444,7 +443,7 @@ func fetchBranches(ctx context.Context, org, repo string, stats *output.RepoStat
 func fetchBranchProtection(ctx context.Context, org, repo, branch string) (*output.BranchProtection, error) {
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/branches/%s/protection", org, repo, branch))
+	cmd := BuildGHCommand(ctx, "api", fmt.Sprintf("/repos/%s/%s/branches/%s/protection", org, repo, branch))
 	cmd.Env = os.Environ()
 
 	var out bytes.Buffer
@@ -643,7 +642,7 @@ func fetchActionsData(ctx context.Context, org, repo string, stats *output.RepoS
 func fetchWorkflows(ctx context.Context, org, repo string, actions *output.RepoActions) error {
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/actions/workflows", org, repo))
+	cmd := BuildGHCommand(ctx, "api", fmt.Sprintf("/repos/%s/%s/actions/workflows", org, repo))
 	cmd.Env = os.Environ()
 
 	var out bytes.Buffer
@@ -677,7 +676,7 @@ func fetchWorkflows(ctx context.Context, org, repo string, actions *output.RepoA
 func fetchActionsSecretsRepo(ctx context.Context, org, repo string, actions *output.RepoActions) error {
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/actions/secrets", org, repo))
+	cmd := BuildGHCommand(ctx, "api", fmt.Sprintf("/repos/%s/%s/actions/secrets", org, repo))
 	cmd.Env = os.Environ()
 
 	var out bytes.Buffer
@@ -704,7 +703,7 @@ func fetchActionsSecretsRepo(ctx context.Context, org, repo string, actions *out
 func fetchActionsVariablesRepo(ctx context.Context, org, repo string, actions *output.RepoActions) error {
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/actions/variables", org, repo))
+	cmd := BuildGHCommand(ctx, "api", fmt.Sprintf("/repos/%s/%s/actions/variables", org, repo))
 	cmd.Env = os.Environ()
 
 	var out bytes.Buffer
@@ -731,7 +730,7 @@ func fetchActionsVariablesRepo(ctx context.Context, org, repo string, actions *o
 func fetchRunnersRepo(ctx context.Context, org, repo string, actions *output.RepoActions) error {
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/actions/runners", org, repo))
+	cmd := BuildGHCommand(ctx, "api", fmt.Sprintf("/repos/%s/%s/actions/runners", org, repo))
 	cmd.Env = os.Environ()
 
 	var out bytes.Buffer
@@ -759,7 +758,7 @@ func fetchRunnersRepo(ctx context.Context, org, repo string, actions *output.Rep
 func fetchCacheUsage(ctx context.Context, org, repo string, actions *output.RepoActions) error {
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/actions/cache/usage", org, repo))
+	cmd := BuildGHCommand(ctx, "api", fmt.Sprintf("/repos/%s/%s/actions/cache/usage", org, repo))
 	cmd.Env = os.Environ()
 
 	var out bytes.Buffer
@@ -805,7 +804,7 @@ func fetchSecurityData(ctx context.Context, org, repo string, stats *output.Repo
 func fetchDependabotData(ctx context.Context, org, repo string, security *output.RepoSecurity) error {
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/vulnerability-alerts", org, repo))
+	cmd := BuildGHCommand(ctx, "api", fmt.Sprintf("/repos/%s/%s/vulnerability-alerts", org, repo))
 	cmd.Env = os.Environ()
 
 	var errOut bytes.Buffer
@@ -892,7 +891,7 @@ func fetchDependabotAlerts(ctx context.Context, org, repo string) (*output.Alert
 func fetchDependabotSecrets(ctx context.Context, org, repo string) ([]output.SecretMetadata, error) {
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/dependabot/secrets", org, repo))
+	cmd := BuildGHCommand(ctx, "api", fmt.Sprintf("/repos/%s/%s/dependabot/secrets", org, repo))
 	cmd.Env = os.Environ()
 
 	var out bytes.Buffer
@@ -918,7 +917,7 @@ func fetchCodeScanningData(ctx context.Context, org, repo string, security *outp
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
 	// Fetch code scanning default setup
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/code-scanning/default-setup", org, repo))
+	cmd := BuildGHCommand(ctx, "api", fmt.Sprintf("/repos/%s/%s/code-scanning/default-setup", org, repo))
 	cmd.Env = os.Environ()
 
 	var out bytes.Buffer
@@ -1097,7 +1096,7 @@ func fetchSecurityAdvisories(ctx context.Context, org, repo string, security *ou
 func fetchPages(ctx context.Context, org, repo string, stats *output.RepoStats) error {
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/pages", org, repo))
+	cmd := BuildGHCommand(ctx, "api", fmt.Sprintf("/repos/%s/%s/pages", org, repo))
 	cmd.Env = os.Environ()
 
 	var out bytes.Buffer
@@ -1190,7 +1189,7 @@ func fetchIssueCounts(ctx context.Context, org, repo string, issuesData *output.
 
 	// Fetch issue counts using search API for efficiency
 	// Get open issues
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/issues?state=open&per_page=1", org, repo))
+	cmd := BuildGHCommand(ctx, "api", fmt.Sprintf("/repos/%s/%s/issues?state=open&per_page=1", org, repo))
 	cmd.Env = os.Environ()
 
 	var out bytes.Buffer
@@ -1452,7 +1451,7 @@ func fetchTrafficData(ctx context.Context, org, repo string, stats *output.RepoS
 func fetchTrafficViews(ctx context.Context, org, repo string) (*output.TrafficStats, error) {
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/traffic/views", org, repo))
+	cmd := BuildGHCommand(ctx, "api", fmt.Sprintf("/repos/%s/%s/traffic/views", org, repo))
 	cmd.Env = os.Environ()
 
 	var out bytes.Buffer
@@ -1498,7 +1497,7 @@ func fetchTrafficViews(ctx context.Context, org, repo string) (*output.TrafficSt
 func fetchTrafficClones(ctx context.Context, org, repo string) (*output.TrafficStats, error) {
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/traffic/clones", org, repo))
+	cmd := BuildGHCommand(ctx, "api", fmt.Sprintf("/repos/%s/%s/traffic/clones", org, repo))
 	cmd.Env = os.Environ()
 
 	var out bytes.Buffer
@@ -1609,7 +1608,7 @@ func fetchGitReferences(ctx context.Context, org, repo string, stats *output.Rep
 func fetchGitLFSStatus(ctx context.Context, org, repo string, stats *output.RepoStats) error {
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/lfs", org, repo))
+	cmd := BuildGHCommand(ctx, "api", fmt.Sprintf("/repos/%s/%s/lfs", org, repo))
 	cmd.Env = os.Environ()
 
 	var out bytes.Buffer
@@ -1673,7 +1672,7 @@ func fetchRepoFiles(ctx context.Context, org, repo string, stats *output.RepoSta
 func fetchFileContent(ctx context.Context, org, repo, path string) (*output.RepoFileContent, error) {
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/contents/%s", org, repo, path))
+	cmd := BuildGHCommand(ctx, "api", fmt.Sprintf("/repos/%s/%s/contents/%s", org, repo, path))
 	cmd.Env = os.Environ()
 
 	var out bytes.Buffer

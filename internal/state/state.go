@@ -84,6 +84,8 @@ type Status struct {
 	rateLimit           RateLimitInfo
 	graphqlRateLimit    GraphQLRateLimitInfo
 	startingGraphQLUsed int64 // Track starting GraphQL usage
+
+	hostname string // GitHub Enterprise Server hostname (empty for github.com)
 }
 
 var global = &Status{}
@@ -333,4 +335,20 @@ func (s *Status) CheckRateLimit(minRequired int64) error {
 	}
 
 	return nil
+}
+
+// SetHostname sets the GitHub Enterprise Server hostname for API calls.
+// Pass an empty string to use github.com (default).
+func (s *Status) SetHostname(hostname string) {
+	s.rateLimitMu.Lock()
+	defer s.rateLimitMu.Unlock()
+	s.hostname = hostname
+}
+
+// GetHostname returns the GitHub Enterprise Server hostname.
+// Returns empty string if using github.com.
+func (s *Status) GetHostname() string {
+	s.rateLimitMu.RLock()
+	defer s.rateLimitMu.RUnlock()
+	return s.hostname
 }

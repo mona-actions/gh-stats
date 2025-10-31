@@ -43,21 +43,15 @@ This file provides context to GitHub Copilot about the codebase architecture, pa
 
 ### Making API Calls
 
+**IMPORTANT**: Always use `BuildGHCommand` helper instead of `exec.Command` directly. This ensures GHES support via `--hostname` flag.
+
 #### REST API Pattern
 ```go
-func FetchSomeData(org, repo string) (DataType, error) {
+func FetchSomeData(ctx context.Context, org, repo string) (DataType, error) {
     endpoint := fmt.Sprintf("repos/%s/%s/resource", org, repo)
     
-    client := ghapi.NewClient()
-    
-    // Always rate limit before API call
-    client.Take()
-    
-    // Track API usage
-    state.GlobalState.IncrementAPICalls()
-    
-    // Use --include to get headers
-    cmd := exec.Command("gh", "api", "--include", endpoint)
+    // Use BuildGHCommand for automatic GHES hostname support
+    cmd := ghapi.BuildGHCommand(ctx, "api", "--include", endpoint)
     cmd.Env = os.Environ()
     
     var stdout, stderr bytes.Buffer
@@ -69,14 +63,9 @@ func FetchSomeData(org, repo string) (DataType, error) {
             org, repo, err, stderr.String())
     }
     
-    // Parse headers and update rate limiter
-    response := stdout.String()
-    headers, body := ghapi.ExtractHeadersAndBody(response)
-    client.UpdateLimiterFromHeaders(headers)
-    
     // Parse JSON response
     var result DataType
-    if err := json.Unmarshal([]byte(body), &result); err != nil {
+    if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
         return DataType{}, fmt.Errorf("failed to parse response: %w", err)
     }
     

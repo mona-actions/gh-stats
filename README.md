@@ -86,6 +86,7 @@ General Flags:
   -v, --verbose           Enable verbose output
   -r, --resume            Resume from existing output file, skipping already processed repositories
       --dry-run           Show what would be collected without making API calls (preview mode)
+      --hostname string   GitHub Enterprise Server hostname (e.g., github.company.com)
   -h, --help              help for run
 ```
 
@@ -250,6 +251,26 @@ mona-actions
 another-org
 # third-org  # commented out
 ```
+
+## GitHub Enterprise Server Support
+
+`gh-stats` works with GitHub Enterprise Server (GHES) instances. Specify your GHES hostname using the `--hostname` flag:
+
+```bash
+# Analyze organization on GHES
+gh stats run --org myorg --hostname github.company.com
+
+# Multiple organizations from a GHES instance
+gh stats run --input orgs.txt --hostname github.company.com
+
+# With other options
+gh stats run --org myorg --hostname github.company.com \
+  --max-workers 5 \
+  --verbose \
+  --no-packages
+```
+
+**Note**: Ensure you're authenticated with the GHES instance using `gh auth login --hostname github.company.com` before running the tool.
 
 ## Output Format
 
