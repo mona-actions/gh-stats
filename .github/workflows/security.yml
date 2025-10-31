@@ -1,0 +1,87 @@
+name: security
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  gosec:
+    name: Security Scan (gosec)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.24'
+          cache: true
+      - name: Run Gosec Security Scanner
+        uses: securego/gosec@master
+        with:
+          args: '-fmt sarif -out gosec.sarif ./...'
+        continue-on-error: true
+
+      - name: Fix SARIF file format
+        if: always()
+        run: |
+          if [ -f gosec.sarif ]; then
+            # Remove fixes that have empty or null artifactChanges
+            jq '(.runs[].results[] | select(has("fixes"))) |= 
+                if .fixes then 
+                  .fixes |= map(select(.artifactChanges != null and (.artifactChanges | length) > 0)) |
+                  if (.fixes | length) == 0 then del(.fixes) else . end
+                else . end' gosec.sarif > gosec-fixed.sarif
+            mv gosec-fixed.sarif gosec.sarif
+            echo "SARIF file fixed - removed invalid fixes"
+          else
+            echo "No SARIF file found"
+          fi
+
+      - name: Upload SARIF file
+        uses: github/codeql-action/upload-sarif@v4
+        if: always() && hashFiles('gosec.sarif') != ''
+        with:
+          sarif_file: gosec.sarif
+        continue-on-error: true
+
+  govulncheck:
+    name: Vulnerability Check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.24'
+          cache: true
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - name: Run govulncheck
+        run: govulncheck ./...
+
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: moderate

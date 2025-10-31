@@ -1,0 +1,55 @@
+# Copilot Ignore File
+# Files and patterns that GitHub Copilot should ignore when providing code suggestions
+
+# Build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+gh-stats
+gh-stats-*
+
+# Test binaries
+*.test
+*.out
+
+# Go workspace file
+go.work
+
+# Vendor dependencies
+vendor/
+
+# Output files
+*.json
+*.csv
+repo-stats-*.csv
+gh-stats-*.json
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+.tmp/
+temp/
+
+# Coverage reports
+*.coverprofile
+coverage.txt
+coverage.html
+
+# Documentation generated files
+docs/generated/
+
+# Large data files
+*.log
