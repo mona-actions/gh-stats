@@ -20,16 +20,16 @@ import (
 )
 
 // orgNamePattern validates GitHub organization names according to GitHub's rules:
-// - Must start and end with alphanumeric character
-// - Can contain alphanumeric characters and hyphens in the middle
-// - Maximum 39 characters (enforced separately)
+// - Must start and end with alphanumeric character.
+// - Can contain alphanumeric characters and hyphens in the middle.
+// - Maximum 39 characters (enforced separately).
 var orgNamePattern = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$`)
 
 // validateOrgName checks if the organization name is valid according to GitHub's rules.
 // GitHub organization names:
-//   - Must be 1-39 characters long
-//   - Can only contain alphanumeric characters and hyphens
-//   - Cannot start or end with a hyphen
+//   - Must be 1-39 characters long.
+//   - Can only contain alphanumeric characters and hyphens.
+//   - Cannot start or end with a hyphen.
 func validateOrgName(org string) error {
 	if org == "" {
 		return fmt.Errorf("organization name cannot be empty")
@@ -123,13 +123,12 @@ func parseOrgFile(absPath string) ([]string, error) {
 	}
 
 	lines := splitLines(string(content))
-	var orgs []string
 	seen := make(map[string]bool)
-	orgs = make([]string, 0, len(lines)/2)
+	orgs := make([]string, 0, len(lines)/2)
 
 	for i, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
+		// splitLines already trims whitespace, check for comments and skip
+		if strings.HasPrefix(line, "#") {
 			continue
 		}
 

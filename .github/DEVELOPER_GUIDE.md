@@ -33,9 +33,13 @@ This guide helps contributors understand the `gh-stats` architecture and provide
                   │
 ┌─────────────────▼───────────────────────────────────┐
 │ API Layer (internal/ghapi/)                         │
-│ - GraphQL queries (graphql.go)                      │
-│ - REST API calls (repositories.go, organizations.go)│
-│ - Rate limiting & retry logic (client.go)           │
+│ - GraphQL queries (graphql_*.go)                    │
+│ - REST API calls (repos_*.go, orgs_*.go)            │
+│ - Rate limiting (client_ratelimit.go)               │
+│ - Retry logic (client_retry.go)                     │
+│ - REST operations (client_rest.go)                  │
+│ - Pagination (client_pagination.go)                 │
+│ - Types (client_types.go, repos_types.go)           │
 └─────────────────┬───────────────────────────────────┘
                   │
 ┌─────────────────▼───────────────────────────────────┐
@@ -62,238 +66,512 @@ This guide helps contributors understand the `gh-stats` architecture and provide
 
 ## Adding a New API Call
 
-### REST API Example
+This section shows complete end-to-end examples for adding new data collection features.
 
-Let's add a new REST API call to fetch repository webhooks count.
+### REST API Example: Adding Webhook Count
 
-**Step 1: Define the response structure** (if needed)
+**Scenario**: Add a feature to count webhooks per repository.
 
-Add to `internal/ghapi/client.go` or create a new file:
+**Complete Flow**:
+
+#### 1. Add the feature flag
+
+**File**: `cmd/root.go`
 
 ```go
-// WebhookResponse represents a webhook from the GitHub API
-type WebhookResponse struct {
-    ID        int64  `json:"id"`
-    Name      string `json:"name"`
-    Active    bool   `json:"active"`
-    CreatedAt string `json:"created_at"`
-    UpdatedAt string `json:"updated_at"`
-}
+// Add flag variable (around line 22)
+var (
+    // ... existing flags ...
+    noWebhooks       bool
+)
+
+// Add flag definition in init() (around line 228)
+rootCmd.Flags().BoolVar(&noWebhooks, "no-webhooks", false, "Skip fetching webhook information")
 ```
 
-**Step 2: Create the API call function**
+#### 2. Add to DataFetchConfig
 
-Add to `internal/ghapi/repositories.go`:
-
-```go
-// FetchWebhooks fetches all webhooks for a repository using the REST API.
-// Returns webhook count and any error encountered.
-func FetchWebhooks(org, repo string) (int, error) {
-    // Build the API endpoint
-    endpoint := fmt.Sprintf("repos/%s/%s/hooks", org, repo)
-    
-    // Create a client and update rate limits
-    client := NewClient()
-    
-    // Use the global rate limiter
-    client.Take()
-    
-    // Increment API call counter
-    state.GlobalState.IncrementAPICalls()
-    
-    // Execute the API call with --include to get headers
-    cmd := exec.Command("gh", "api", "--include", endpoint)
-    cmd.Env = os.Environ()
-    
-    var stdout, stderr bytes.Buffer
-    cmd.Stdout = &stdout
-    cmd.Stderr = &stderr
-    
-    if err := cmd.Run(); err != nil {
-        return 0, fmt.Errorf("failed to fetch webhooks for %s/%s: %w\nstderr: %s", 
-            org, repo, err, stderr.String())
-    }
-    
-    // Parse headers and update rate limiter
-    response := stdout.String()
-    headers, body := ExtractHeadersAndBody(response)
-    client.UpdateLimiterFromHeaders(headers)
-    
-    // Parse the JSON response
-    var webhooks []WebhookResponse
-    if err := json.Unmarshal([]byte(body), &webhooks); err != nil {
-        return 0, fmt.Errorf("failed to parse webhooks response: %w", err)
-    }
-    
-    return len(webhooks), nil
-}
-```
-
-**Step 3: Integrate into data collection**
-
-Add to `internal/stats/processor.go` in the `collectRepoData` function:
+**File**: `internal/ghapi/repos_types.go`
 
 ```go
-// Fetch webhooks if not disabled
-var webhooksCount int
-if !config.NoWebhooks {
-    count, err := ghapi.FetchWebhooks(org, repo)
-    if err != nil {
-        if config.Verbose {
-            pterm.Warning.Printf("Could not fetch webhooks for %s/%s: %v\n", org, repo, err)
-        }
-    } else {
-        webhooksCount = count
-    }
-}
-```
-
-**Step 4: Add to data model**
-
-Update `internal/output/models.go`:
-
-```go
-type RepoData struct {
+type DataFetchConfig struct {
     // ... existing fields ...
-    Webhooks int `json:"webhooks"`
+    FetchWebhooks        bool
 }
 ```
 
-**Step 5: Update the feature flag** (see [Adding a New Feature Flag](#adding-a-new-feature-flag))
+#### 3. Wire up the flag to config
 
-### GraphQL API Example
-
-Let's add a new GraphQL field to fetch deployment count.
-
-**Step 1: Update the GraphQL query**
-
-In `internal/ghapi/graphql.go`, modify the `buildRepositoryQuery` function:
+**File**: `cmd/root.go` in `rootCmd.RunE` (around line 100)
 
 ```go
-const query = `
-query($org: String!, $endCursor: String) {
-    organization(login: $org) {
-        repositories(first: 50, after: $endCursor) {
-            pageInfo {
-                endCursor
-                hasNextPage
-            }
-            nodes {
-                name
-                isArchived
-                isFork
-                # ... existing fields ...
-                
-                # Add the new field
-                deployments(first: 0) {
+// Apply minimal mode overrides
+if minimal {
+    // ... existing no-* flags ...
+    noWebhooks = true
+}
+
+// Apply CLI overrides
+if cmd.Flags().Changed("no-webhooks") {
+    noWebhooks, _ = cmd.Flags().GetBool("no-webhooks")
+}
+
+// Build config
+config := stats.Config{
+    // ... existing fields ...
+    DataFetchConfig: ghapi.DataFetchConfig{
+        // ... existing fields ...
+        FetchWebhooks: !noWebhooks,
+    },
+}
+```
+
+#### 4. Add the data model field
+
+**File**: `internal/output/models.go`
+
+```go
+type RepoStats struct {
+    // ... existing fields ...
+    
+    // In the Automation section:
+    Webhooks         int                `json:"webhooks"`
+}
+```
+
+#### 5. Create the REST API function
+
+**File**: `internal/ghapi/repos_webhooks.go` (new file)
+
+```go
+package ghapi
+
+import (
+    "context"
+    "encoding/json"
+    "fmt"
+    
+    "github.com/mona-actions/gh-stats/internal/output"
+)
+
+// fetchRepoWebhooks fetches webhook count for a repository.
+func fetchRepoWebhooks(ctx context.Context, org, repo string, stats *output.RepoStats) error {
+    var webhooks []struct {
+        ID     int64  `json:"id"`
+        Name   string `json:"name"`
+        Active bool   `json:"active"`
+    }
+    
+    endpoint := fmt.Sprintf("/repos/%s/%s/hooks", org, repo)
+    
+    err := RunRESTCallback(ctx, endpoint, func(data []byte) error {
+        var page []struct {
+            ID     int64  `json:"id"`
+            Name   string `json:"name"`
+            Active bool   `json:"active"`
+        }
+        
+        if err := json.Unmarshal(data, &page); err != nil {
+            return err
+        }
+        
+        webhooks = append(webhooks, page...)
+        return nil
+    })
+    
+    if err != nil {
+        return err
+    }
+    
+    stats.Webhooks = len(webhooks)
+    return nil
+}
+```
+
+#### 6. Integrate into data collection
+
+**File**: `internal/ghapi/repos_metadata.go`
+
+Option A - Add to existing fetch function:
+
+```go
+// Find fetchRepoAutomationData (around line 105) and add:
+func fetchRepoAutomationData(ctx context.Context, org, repo string, fetchConfig DataFetchConfig, stats *output.RepoStats) {
+    if fetchConfig.FetchWebhooks {
+        if err := fetchRepoWebhooks(ctx, org, repo, stats); err != nil {
+            pterm.Warning.Printf("Failed to fetch webhooks for %s/%s: %v\n", org, repo, err)
+        }
+    }
+    
+    // ... rest of function ...
+}
+```
+
+Option B - Create new category function:
+
+```go
+// Add to GetEnhancedRepoData (around line 200):
+func GetEnhancedRepoData(ctx context.Context, org, repo string, teamAccessMap map[string][]output.RepoTeamAccess, fetchConfig DataFetchConfig) (*output.RepoStats, error) {
+    stats := &output.RepoStats{
+        Org:  org,
+        Name: repo,
+    }
+
+    // Fetch different categories of data
+    fetchRepoSettingsAndAccess(ctx, org, repo, teamAccessMap, fetchConfig, stats)
+    fetchRepoAutomationData(ctx, org, repo, fetchConfig, stats)
+    fetchRepoWebhookData(ctx, org, repo, fetchConfig, stats)  // NEW
+    fetchRepoIssuesAndPRs(ctx, org, repo, fetchConfig, stats)
+    // ... rest ...
+
+    return stats, nil
+}
+
+// Add new category function:
+func fetchRepoWebhookData(ctx context.Context, org, repo string, fetchConfig DataFetchConfig, stats *output.RepoStats) {
+    if fetchConfig.FetchWebhooks {
+        if err := fetchWebhooks(ctx, org, repo, stats); err != nil {
+            fmt.Printf(" WARNING Could not fetch webhooks for %s/%s: %v\n", org, repo, err)
+        }
+    }
+}
+```
+
+#### 7. Update documentation
+
+**File**: `README.md` - Add to feature flags table:
+
+```markdown
+| `--no-webhooks` | Webhook configurations | ~1 call/repo | Webhook counts and active status |
+```
+
+#### 8. Test the feature
+
+```bash
+# Build
+go build -o gh-stats
+
+# Test with flag enabled (default)
+./gh-stats --org test-org --verbose
+
+# Test with flag disabled
+./gh-stats --org test-org --no-webhooks --verbose
+
+# Verify JSON output
+cat gh-stats-*.json | jq '.repos[0].webhooks'
+```
+
+**Complete!** You've now added full webhook collection with feature flag control.
+
+### GraphQL API Example: Adding Deployment Count
+
+**Scenario**: Add a feature to count deployments per repository using GraphQL.
+
+**Complete Flow**:
+
+#### 1. Add the feature flag
+
+**File**: `cmd/root.go`
+
+```go
+// Add flag variable (around line 22)
+var (
+    // ... existing flags ...
+    noDeployments    bool
+)
+
+// Add flag definition in init() (around line 228)
+rootCmd.Flags().BoolVar(&noDeployments, "no-deployments", false, "Skip fetching deployment information")
+```
+
+#### 2. Add to DataFetchConfig
+
+**File**: `internal/ghapi/repos_types.go`
+
+```go
+type DataFetchConfig struct {
+    // ... existing fields ...
+    FetchDeployments     bool
+}
+```
+
+#### 3. Wire up the flag to config
+
+**File**: `cmd/root.go` in `rootCmd.RunE`
+
+```go
+// Apply minimal mode overrides
+if minimal {
+    // ... existing no-* flags ...
+    noDeployments = true
+}
+
+// Apply CLI overrides
+if cmd.Flags().Changed("no-deployments") {
+    noDeployments, _ = cmd.Flags().GetBool("no-deployments")
+}
+
+// Build config
+config := stats.Config{
+    // ... existing fields ...
+    DataFetchConfig: ghapi.DataFetchConfig{
+        // ... existing fields ...
+        FetchDeployments: !noDeployments,
+    },
+}
+```
+
+#### 4. Add the data model field
+
+**File**: `internal/output/models.go`
+
+```go
+type RepoStats struct {
+    // ... existing fields ...
+    
+    // Add in appropriate section (e.g., CI/CD):
+    Deployments      int                `json:"deployments"`
+}
+```
+
+#### 5. Update the GraphQL query
+
+**File**: `internal/ghapi/graphql_queries.go`
+
+Find the `getRepositoryFields` function (around line 570) and add the new field:
+
+```go
+func getRepositoryFields(config DataFetchConfig) string {
+    fields := `				name
+                nameWithOwner
+                # ... existing base fields ...
+`
+    
+    // Add deployments field conditionally
+    if config.FetchDeployments {
+        fields += `				deployments(first: 0) {
                     totalCount
                 }
-            }
-        }
-    }
-}
 `
+    }
+    
+    // ... rest of fields ...
+    
+    return fields
+}
 ```
 
-**Step 2: Extract the field in processing**
-
-Update `internal/ghapi/graphql.go` in the data extraction section:
+**Important**: If this is an "expensive" field (slow query), add it to the expensive fields section instead:
 
 ```go
-func processGraphQLRepoData(repoNode map[string]interface{}) RepoData {
-    // ... existing field extraction ...
-    
-    // Extract deployment count
-    deploymentsCount := 0
-    if deployments, ok := repoNode["deployments"].(map[string]interface{}); ok {
-        if count, ok := deployments["totalCount"].(float64); ok {
-            deploymentsCount = int(count)
-        }
+// In getExpensiveOnlyConfig function (around line 60):
+func getExpensiveOnlyConfig(base DataFetchConfig) DataFetchConfig {
+    return DataFetchConfig{
+        // ... existing expensive fields ...
+        FetchDeployments:  base.FetchDeployments,
+    }
+}
+
+// Then add to fetchExpensiveGraphQLFields query (around line 320)
+```
+
+#### 6. Create the extraction function
+
+**File**: `internal/ghapi/graphql_extract.go`
+
+```go
+// Add extraction helper function (around line 280):
+func extractDeployments(r map[string]interface{}) int {
+    deploymentsData, ok := r["deployments"].(map[string]interface{})
+    if !ok {
+        return 0
     }
     
-    return RepoData{
+    totalCount, ok := deploymentsData["totalCount"].(float64)
+    if !ok {
+        return 0
+    }
+    
+    return int(totalCount)
+}
+```
+
+#### 7. Use the extraction in buildBasicRepoStats
+
+**File**: `internal/ghapi/graphql_extract.go`
+
+```go
+// In buildBasicRepoStats function (around line 13):
+func buildBasicRepoStats(org string, r map[string]interface{}, packageData map[string]output.PackageCounts, issueEventsCount int) output.RepoStats {
+    // ... existing getTotalCount, getString helpers ...
+    
+    // Extract all fields
+    // ... existing extractions ...
+    deploymentsCount := extractDeployments(r)
+    
+    return output.RepoStats{
+        Org:  org,
+        Name: getString("name"),
         // ... existing fields ...
         Deployments: deploymentsCount,
     }
 }
 ```
 
-**Step 3: Add to data model**
-
-Update `internal/output/models.go`:
+**OR** if it's an expensive field, add to the expensive field extractors:
 
 ```go
-type RepoData struct {
-    // ... existing fields ...
-    Deployments int `json:"deployments"`
+// In graphql_fetch.go, add to expensiveFieldMapping (around line 229):
+var expensiveFieldMapping = []struct {
+    enabled   func(DataFetchConfig) bool
+    extractor expensiveFieldExtractor
+}{
+    // ... existing mappings ...
+    {
+        enabled: func(c DataFetchConfig) bool { return c.FetchDeployments },
+        extractor: func(repo map[string]interface{}, stats *output.RepoStats) {
+            stats.Deployments = extractDeployments(repo)
+        },
+    },
 }
 ```
 
-### Important Considerations for API Calls
+#### 8. Update documentation
 
-1. **Always use rate limiting**: Call `client.Take()` before making API requests
-2. **Track API usage**: Call `state.GlobalState.IncrementAPICalls()` for each call
-3. **Update rate limiter**: Use `client.UpdateLimiterFromHeaders(headers)` after responses
-4. **Handle errors gracefully**: Log warnings for non-critical data, continue processing
-5. **Use --include flag**: Get headers with `gh api --include` to track rate limits
-6. **Test with verbose mode**: Ensure proper logging with `--verbose` flag
+**File**: `README.md` - Add to feature flags table:
+
+```markdown
+| `--no-deployments` | Deployment history | ~0 calls (GraphQL) | Deployment counts per repo |
+```
+
+#### 9. Test the feature
+
+```bash
+# Build
+go build -o gh-stats
+
+# Test with batching (GraphQL) - default mode
+./gh-stats --org test-org --verbose
+
+# Test with flag disabled
+./gh-stats --org test-org --no-deployments --verbose
+
+# Test in minimal mode (should skip if expensive)
+./gh-stats --org test-org --minimal --verbose
+
+# Verify JSON output
+cat gh-stats-*.json | jq '.repos[0].deployments'
+
+# Verify GraphQL query includes the field
+./gh-stats --org test-org --dry-run --verbose 2>&1 | grep -A 50 "GraphQL query"
+```
+
+**Complete!** You've now added deployment count collection via GraphQL with batching support.
+
+---
+
+### Summary: REST vs GraphQL
+
+**When to use REST**:
+- Need detailed item-level data (webhooks, branches, specific configs)
+- Paginating through lists
+- Endpoints not available in GraphQL
+
+**When to use GraphQL**:
+- Counting items (`first: 0` with `totalCount`)
+- Fetching multiple fields in single query
+- Can be batched across repositories (up to 50 repos/query)
+
+**Key differences**:
+- REST: Uses `RunRESTCallback` for pagination, called per-repo in `GetEnhancedRepoData`
+- GraphQL: Add to `getRepositoryFields`, batched via `GetBatchedRepoBasicDetails`
+
+---
 
 ## Adding a New Feature Flag
 
-Feature flags allow users to skip optional data collection to reduce API usage.
+Feature flags allow users to skip optional data collection to reduce API usage. See the complete examples above for the full flow.
 
-**Step 1: Add flag to command definition**
+**Quick Reference - All Steps**:
 
-In `cmd/run.go`, add the flag:
+#### 1. Add CLI flag variable (`cmd/root.go` ~line 30)
 
 ```go
-func init() {
-    // ... existing flags ...
-    runCmd.Flags().Bool("no-webhooks", false, "Skip fetching webhook information")
+var (
+    noFeature    bool
+)
+```
+
+#### 2. Define the flag (`cmd/root.go` init() ~line 280)
+
+```go
+rootCmd.Flags().BoolVar(&noFeature, "no-feature", false, "Skip fetching feature data")
+```
+
+#### 3. Add to DataFetchConfig (`internal/ghapi/repos_types.go`)
+
+```go
+type DataFetchConfig struct {
+    FetchFeature bool
 }
 ```
 
-**Step 2: Add to config struct**
-
-In `internal/stats/processor.go` (or wherever config is defined):
+#### 4. Wire up in config (`cmd/root.go` rootCmd.RunE ~line 100)
 
 ```go
-type Config struct {
-    // ... existing fields ...
-    NoWebhooks bool
+// Minimal mode: enable all --no-* flags
+if minimal {
+    noFeature = true
+}
+
+// CLI overrides: explicit flags take precedence
+if cmd.Flags().Changed("no-feature") {
+    noFeature, _ = cmd.Flags().GetBool("no-feature")
+}
+
+// Build config: convert --no-* to Fetch*
+config := stats.Config{
+    DataFetchConfig: ghapi.DataFetchConfig{
+        FetchFeature: !noFeature,
+    },
 }
 ```
 
-**Step 3: Read flag value**
+#### 5. Use in collection code
 
-In `cmd/run.go` where config is populated:
+**REST**: `internal/ghapi/repos_metadata.go`
 
 ```go
-config := &stats.Config{
-    // ... existing fields ...
-    NoWebhooks: viper.GetBool("no-webhooks"),
+if fetchConfig.FetchFeature {
+    if err := fetchFeature(ctx, org, repo, stats); err != nil {
+        pterm.Warning.Printf("Failed to fetch feature for %s/%s: %v\n", org, repo, err)
+    }
 }
 ```
 
-**Step 4: Use in data collection**
-
-In `internal/stats/processor.go`:
+**GraphQL**: `internal/ghapi/graphql_queries.go`
 
 ```go
-// Only fetch webhooks if not disabled
-if !config.NoWebhooks {
-    webhooks, err := ghapi.FetchWebhooks(org, repo)
-    // ... handle result ...
+if config.FetchFeature {
+    fields += `feature { totalCount }`
 }
 ```
 
-**Step 5: Update documentation**
+#### 6. Update help text (`cmd/root.go` usage template ~line 240)
 
-Add to the feature flags table in `README.md`:
+Add to appropriate impact section:
 
-```markdown
-| `--no-webhooks` | Webhook configurations | ~1 call/repo | Skip webhook details |
 ```
+      --no-feature        Skip fetching feature data
+```
+
+#### 7. Document in README
+
+Add to feature flags table with API cost and description.
+
+**See complete examples**: [REST Example](#rest-api-example-adding-webhook-count) | [GraphQL Example](#graphql-api-example-adding-deployment-count)
+
+---
 
 ## Adding a New Output Field
 
@@ -322,8 +600,8 @@ Add the field to the output format example with description.
 
 ```bash
 # Run and verify JSON structure
-gh stats run --org test-org
-cat gh-stats-2025-10-30.json | jq '.repos[0]'
+gh stats --org test-org
+cat gh-stats-2025-11-06.json | jq '.repos[0]'
 ```
 
 ## Testing Changes
@@ -335,17 +613,23 @@ cat gh-stats-2025-10-30.json | jq '.repos[0]'
 go build -o gh-stats
 
 # 2. Test with a small organization
-./gh-stats run --org small-test-org --verbose
+./gh-stats --org small-test-org --verbose
 
 # 3. Test with feature flags
-./gh-stats run --org test-org --no-webhooks --verbose
+./gh-stats --org test-org --no-webhooks --verbose
 
-# 4. Test resume functionality
-# Interrupt with Ctrl-C, then re-run
-./gh-stats run --org test-org
+# 4. Test automatic resume functionality
+# Interrupt with Ctrl-C, then re-run (resumes automatically)
+./gh-stats --org test-org
 
 # 5. Test error handling
-./gh-stats run --org nonexistent-org --verbose
+./gh-stats --org nonexistent-org --verbose
+
+# 6. Test minimal mode
+./gh-stats --org test-org --minimal
+
+# 7. Test dry-run mode
+./gh-stats --org test-org --dry-run
 ```
 
 ### Unit Testing
@@ -388,9 +672,10 @@ go build -race
 ### Performance
 
 1. **Use GraphQL for bulk data**: Fetch multiple fields in single query when possible
-2. **Batch operations**: Group related API calls together
-3. **Cache when possible**: Store frequently accessed data in memory
-4. **Respect rate limits**: Always use the global rate limiter
+2. **Use GraphQL batching**: Process multiple repositories in a single query (see Pattern 5 below)
+3. **Batch operations**: Group related API calls together
+4. **Cache when possible**: Store frequently accessed data in memory
+5. **Respect rate limits**: Track all API calls with `state.Get().IncrementAPICalls()`
 
 ### Error Handling
 
@@ -405,115 +690,14 @@ go build -race
 2. **Channel communication**: Prefer channels over shared memory
 3. **Context propagation**: Pass `context.Context` for cancellation support
 4. **Worker pools**: Use semaphores (buffered channels) for concurrency control
-
-## Common Patterns
-
-### Pattern 1: Adding a REST API Call with Pagination
-
-```go
-func FetchPaginatedData(org, repo string) ([]Item, error) {
-    endpoint := fmt.Sprintf("repos/%s/%s/items", org, repo)
-    
-    client := NewClient()
-    var allItems []Item
-    page := 1
-    
-    for {
-        client.Take()
-        state.GlobalState.IncrementAPICalls()
-        
-        pagedEndpoint := fmt.Sprintf("%s?page=%d&per_page=100", endpoint, page)
-        cmd := exec.Command("gh", "api", "--include", pagedEndpoint)
-        
-        // ... execute command and parse response ...
-        
-        if len(items) == 0 {
-            break // No more pages
-        }
-        
-        allItems = append(allItems, items...)
-        page++
-    }
-    
-    return allItems, nil
-}
-```
-
-### Pattern 2: Adding a GraphQL Field with Error Handling
-
-```go
-func extractFieldSafely(node map[string]interface{}, field string) int {
-    if fieldData, ok := node[field].(map[string]interface{}); ok {
-        if count, ok := fieldData["totalCount"].(float64); ok {
-            return int(count)
-        }
-    }
-    return 0 // Return default if field not found
-}
-
-// Usage:
-deployments := extractFieldSafely(repoNode, "deployments")
-```
-
-### Pattern 3: Conditional Data Collection with Feature Flags
-
-```go
-func collectRepoData(org, repo string, config *Config) (*RepoData, error) {
-    data := &RepoData{
-        Org:  org,
-        Repo: repo,
-    }
-    
-    // Always collect basic data
-    data.Stars = fetchStars(org, repo)
-    
-    // Conditional collection based on flags
-    if !config.NoWebhooks {
-        data.Webhooks = fetchWebhooks(org, repo)
-    }
-    
-    if !config.NoActions {
-        data.Workflows = fetchWorkflows(org, repo)
-    }
-    
-    return data, nil
-}
-```
-
-### Pattern 4: Graceful Error Handling in Workers
-
-```go
-func processRepository(org, repo string, config *Config) error {
-    // Attempt to fetch critical data
-    basicData, err := fetchBasicData(org, repo)
-    if err != nil {
-        return fmt.Errorf("critical: failed to fetch basic data: %w", err)
-    }
-    
-    // Attempt to fetch optional data
-    if !config.NoPackages {
-        packages, err := fetchPackages(org, repo)
-        if err != nil {
-            // Log warning but continue
-            if config.Verbose {
-                pterm.Warning.Printf("Could not fetch packages for %s/%s: %v\n", 
-                    org, repo, err)
-            }
-        } else {
-            basicData.Packages = packages
-        }
-    }
-    
-    return saveData(basicData)
-}
-```
+5. **Error collection**: Use `appendError(mu, errors, org, repo, err)` for thread-safe error aggregation
 
 ## Debugging Tips
 
 ### Enable Verbose Mode
 
 ```bash
-gh stats run --org test-org --verbose
+gh stats --org test-org --verbose
 ```
 
 Shows:
@@ -532,13 +716,13 @@ gh api rate_limit
 
 ```bash
 # Pretty print JSON
-cat gh-stats-2025-10-30.json | jq '.'
+cat gh-stats-2025-11-06.json | jq '.'
 
 # Check specific repository
-cat gh-stats-2025-10-30.json | jq '.repos[] | select(.repo == "my-repo")'
+cat gh-stats-2025-11-06.json | jq '.repos[] | select(.repo == "my-repo")'
 
 # Count total repos
-cat gh-stats-2025-10-30.json | jq '.repos | length'
+cat gh-stats-2025-11-06.json | jq '.repos | length'
 ```
 
 ### Test with Small Dataset
@@ -552,7 +736,7 @@ Create a test organization with 2-3 repositories to quickly iterate on changes.
 log.Printf("Debug: org=%s, repo=%s, value=%v\n", org, repo, value)
 
 # Use delve debugger
-dlv debug -- run --org test-org
+dlv debug -- --org test-org
 ```
 
 ## Additional Resources

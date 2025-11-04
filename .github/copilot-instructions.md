@@ -10,7 +10,7 @@ This file provides context to GitHub Copilot about the codebase architecture, pa
 
 ### 1. CLI Layer (`cmd/`)
 - Uses `cobra` framework for command structure
-- Command definitions in `cmd/run.go`
+- Command definitions in `cmd/root.go` (single root command, no subcommands)
 - Flag parsing and validation
 - Config struct population from flags
 
@@ -22,9 +22,13 @@ This file provides context to GitHub Copilot about the codebase architecture, pa
 - Parallel repository processing
 
 ### 3. API Layer (`internal/ghapi/`)
-- GraphQL queries: `graphql.go`
-- REST API calls: `repositories.go`, `organizations.go`
-- Rate limiting & retry: `client.go`
+- GraphQL queries: `graphql_*.go` (execution, batching, pagination, extraction)
+- REST API calls: `repos_*.go`, `orgs_*.go`
+- Rate limiting: `client_ratelimit.go`
+- Retry logic: `client_retry.go`
+- REST operations: `client_rest.go`
+- Pagination: `client_pagination.go`
+- Types: `client_types.go`, `repos_types.go`
 - Always use `gh` CLI for API calls (not direct HTTP)
 
 ### 4. State Management (`internal/state/`)
@@ -48,15 +52,10 @@ This file provides context to GitHub Copilot about the codebase architecture, pa
 func FetchSomeData(org, repo string) (DataType, error) {
     endpoint := fmt.Sprintf("repos/%s/%s/resource", org, repo)
     
-    client := ghapi.NewClient()
-    
-    // Always rate limit before API call
-    client.Take()
-    
     // Track API usage
-    state.GlobalState.IncrementAPICalls()
+    state.Get().IncrementAPICalls()
     
-    // Use --include to get headers
+    // Use --include to get headers (rate limiting handled by execute functions)
     cmd := exec.Command("gh", "api", "--include", endpoint)
     cmd.Env = os.Environ()
     
@@ -69,14 +68,9 @@ func FetchSomeData(org, repo string) (DataType, error) {
             org, repo, err, stderr.String())
     }
     
-    // Parse headers and update rate limiter
-    response := stdout.String()
-    headers, body := ghapi.ExtractHeadersAndBody(response)
-    client.UpdateLimiterFromHeaders(headers)
-    
-    // Parse JSON response
+    // Parse JSON response directly
     var result DataType
-    if err := json.Unmarshal([]byte(body), &result); err != nil {
+    if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
         return DataType{}, fmt.Errorf("failed to parse response: %w", err)
     }
     
@@ -123,6 +117,76 @@ for _, page := range pages {
 }
 ```
 
+#### GraphQL Batching Pattern (PREFERRED for Repository Data)
+```go
+// Batch processing reduces API calls significantly (e.g., 46% reduction for minimal mode)
+// Default batch size: 20 repos, configurable via --graphql-batch-size (1-50)
+
+// 1. Collect repositories to batch
+repos := []string{"repo1", "repo2", "repo3"}  // Up to 50 repos per batch
+
+// 2. Define fetch config (base fields are automatically extracted for batching)
+fetchConfig := ghapi.DataFetchConfig{
+    FetchSettings:      true,
+    FetchLanguages:     true,
+    FetchTopics:        true,
+    FetchPRsData:       false,  // Expensive, skipped in minimal mode
+    FetchIssuesData:    false,  // Expensive, skipped in minimal mode
+    FetchContributors:  false,  // Expensive, skipped in minimal mode
+    // Base fields (Settings, Languages, Topics) are kept in batch
+    // Expensive fields are excluded from batch and fetched per-repo if enabled
+}
+
+// 3. Fetch batch data (returns map of repo name -> basic data)
+basicRepoDataMap, failedRepos, err := ghapi.GetBatchedRepoBasicDetails(ctx, org, repos, fetchConfig)
+if err != nil {
+    return fmt.Errorf("batch fetch failed: %w", err)
+}
+
+// 4. Process results (with expensive fields fetched individually if needed)
+for repoName, basicData := range basicRepoDataMap {
+    // ProcessRepoWithBasicData handles expensive fields automatically
+    stats, err := ghapi.ProcessRepoWithBasicData(ctx, org, repoName, basicData, 
+        packageData, teamAccessMap, fetchConfig)
+    if err != nil {
+        if config.Verbose {
+            pterm.Warning.Printf("Failed to process %s/%s: %v\n", org, repoName, err)
+        }
+        continue
+    }
+    
+    // Use stats data
+    processRepoData(stats)
+}
+
+// 5. Handle failed repos from batch
+for _, repoName := range failedRepos {
+    pterm.Warning.Printf("Repo not found in batch: %s/%s\n", org, repoName)
+}
+
+// Performance: 36 repos with batch size 50 = 1 GraphQL call (vs 36 individual calls)
+// API reduction: 46% fewer calls in minimal mode with batching enabled
+```
+
+#### When to Use Batching vs Individual Queries
+
+**Use Batching (GetBatchedRepoBasicDetails + ProcessRepoWithBasicData):**
+- Collecting data for multiple repositories in parallel
+- Worker pool processing repository lists
+- Minimal mode or selective field collection
+- Want to optimize API call count
+- Base fields (Settings, Languages, Topics) for many repos
+
+**Use Individual Queries (GetRepoDetails):**
+- Single repository detailed analysis
+- Custom query shapes not fitting batch pattern
+- Need full control over query structure
+
+**Use Pagination (RunGraphQLPaginated):**
+- Organization-level data (members, teams, projects)
+- Need pagination control for large result sets
+- Fetching repository lists
+
 ### Error Handling
 
 #### Critical vs Non-Critical Errors
@@ -152,41 +216,62 @@ if !config.NoPackages {
 - Wrap errors: `fmt.Errorf("description: %w", err)`
 - Include stderr in API errors: `"error: %w\nstderr: %s"`
 
+#### Error Aggregation Helper
+```go
+// When collecting multiple optional fields, aggregate errors
+func appendError(existingErr error, newErr error, context string) error {
+    if newErr == nil {
+        return existingErr
+    }
+    errMsg := fmt.Sprintf("%s: %v", context, newErr)
+    if existingErr == nil {
+        return fmt.Errorf(errMsg)
+    }
+    return fmt.Errorf("%w; %s", existingErr, errMsg)
+}
+
+// Usage example:
+var aggregatedErr error
+if data1, err := fetchOptionalData1(); err != nil {
+    aggregatedErr = appendError(aggregatedErr, err, "data1")
+} else {
+    result.Data1 = data1
+}
+if data2, err := fetchOptionalData2(); err != nil {
+    aggregatedErr = appendError(aggregatedErr, err, "data2")
+} else {
+    result.Data2 = data2
+}
+
+// Return aggregate error if any optional fields failed
+return result, aggregatedErr
+```
+
 ### Rate Limiting
 
-#### Always Use Global Rate Limiter
+#### Track API Calls
 ```go
-client := ghapi.NewClient()
-client.Take()  // Blocks until rate limit allows
+state.Get().IncrementAPICalls()
 ```
 
-#### Track All API Calls
-```go
-state.GlobalState.IncrementAPICalls()
-// or
-client.IncrementAPICall(tracker)
-```
-
-#### Update After Responses
-```go
-headers, body := ghapi.ExtractHeadersAndBody(response)
-client.UpdateLimiterFromHeaders(headers)
-```
+#### Rate Limiting is Built-In
+Rate limiting is handled automatically by the execute functions (`executeGraphQLPage`, `executeRESTPaginatedCall`).
+No manual rate limiter calls needed - just track API usage with `IncrementAPICalls()`.
 
 ### Feature Flags
 
 #### Adding New Feature Flag
 ```go
-// 1. Add flag in cmd/run.go
-runCmd.Flags().Bool("no-feature", false, "Skip fetching feature data")
+// 1. Add flag in cmd/root.go
+rootCmd.Flags().Bool("no-feature", false, "Skip fetching feature data")
 
-// 2. Add to Config struct
-type Config struct {
-    NoFeature bool
+// 2. Add to DataFetchConfig in repos_types.go
+type DataFetchConfig struct {
+    FetchFeature bool
 }
 
 // 3. Use in collection logic
-if !config.NoFeature {
+if fetchConfig.FetchFeature {
     data, err := fetchFeature(org, repo)
     // handle...
 }
@@ -294,9 +379,9 @@ if err != nil {
 ## Important Conventions
 
 ### 1. Rate Limiting is Mandatory
-- **ALWAYS** call `client.Take()` before API calls
-- **ALWAYS** track with `IncrementAPICalls()`
-- **ALWAYS** update limiter from response headers
+- **ALWAYS** track with `state.Get().IncrementAPICalls()`
+- Rate limiting is built into execute functions (no manual calls needed)
+- Secondary rate limits are handled automatically with retry logic
 
 ### 2. Error Context is Critical
 - Include org/repo names in error messages
@@ -313,6 +398,9 @@ if err != nil {
 - Use `first: 0` in GraphQL to get counts without data
 - Cache frequently accessed data in memory
 - Write output incrementally (per repository)
+- **Use GraphQL batching for repository data** (20 repos/batch by default)
+- Batch size is configurable via `--graphql-batch-size` (1-50)
+- Split config into base (cheap) vs expensive fields for optimal batching
 
 ### 5. Code Style
 - Run `go fmt ./...` before committing
@@ -336,16 +424,18 @@ if err != nil {
 ❌ **Don't block without timeout** - Use context for cancellation  
 ❌ **Don't modify files in-place** - Use atomic writes (temp + rename)  
 ❌ **Don't share state without synchronization** - Use mutexes or channels  
+❌ **Don't forget line ending normalization** - HTTP responses may have \r\n  
+❌ **Don't use individual GraphQL queries for multiple repos** - Use batching instead  
 
 ## File Organization
 
 ### When adding new functionality:
 
-1. **New API endpoint** → `internal/ghapi/repositories.go` or `organizations.go`
-2. **New GraphQL query** → `internal/ghapi/graphql.go`
+1. **New REST API endpoint** → `internal/ghapi/repos_*.go` or `orgs_*.go`
+2. **New GraphQL query** → `internal/ghapi/graphql_*.go`
 3. **New data model** → `internal/output/models.go`
-4. **New feature flag** → `cmd/run.go` (flag) + `internal/stats/processor.go` (config)
-5. **New command** → `cmd/` (new file)
+4. **New feature flag** → `cmd/root.go` (flag) + `internal/ghapi/repos_types.go` (DataFetchConfig)
+5. **New command** → Not applicable (single root command architecture)
 
 ### Package responsibilities:
 - `cmd/` - CLI interface only, no business logic
@@ -358,7 +448,7 @@ if err != nil {
 
 - **cobra** - CLI framework (don't add alternatives)
 - **pterm** - Terminal output (don't use other print libraries)
-- **go-ratelimit** - Rate limiting (centralized in client.go)
+- **go-ratelimit** - Rate limiting (centralized in client_ratelimit.go)
 - **gh CLI** - GitHub API access (required, don't replace)
 
 ## Testing Patterns
@@ -396,22 +486,87 @@ When adding features:
 ## Quick Reference
 
 ### Key Files to Know
-- `cmd/run.go` - Command definition and flags
+- `cmd/root.go` - Command definition and flags
 - `internal/stats/processor.go` - Main orchestration logic
 - `internal/stats/concurrency.go` - Worker pool implementation
-- `internal/ghapi/client.go` - Rate limiting and API client
-- `internal/ghapi/graphql.go` - GraphQL query execution
+- `internal/ghapi/client_ratelimit.go` - Rate limiting
+- `internal/ghapi/graphql_*.go` - GraphQL query execution and batching
 - `internal/output/json.go` - JSON output with caching
 - `internal/state/state.go` - Global state management
 
 ### Common Tasks Quick Links
-- Add REST API call → See `internal/ghapi/repositories.go` examples
-- Add GraphQL field → See `internal/ghapi/graphql.go` query patterns
-- Add feature flag → See `cmd/run.go` flag definitions
+- Add REST API call → See `internal/ghapi/repos_*.go` examples
+- Add GraphQL field → See `internal/ghapi/graphql_*.go` query patterns
+- Add feature flag → See `cmd/root.go` flag definitions
 - Add output field → See `internal/output/models.go` structs
 - Debug rate limits → Use `--verbose` flag
 - Test changes → `go test -race ./...` and manual testing
+- Optimize API calls → Use GraphQL batching pattern (see `GetBatchedRepoBasicDetails`)
+- Parse HTTP responses → Always use `extractHeadersAndBody()` for line ending normalization
 
 ---
 
 **Remember**: This is a production tool used by many organizations. Prioritize reliability, rate limit compliance, and data integrity over performance optimizations.
+
+## Recent Improvements & Patterns to Follow
+
+### GraphQL Batching Implementation (v0.2.0)
+- **Pattern**: Batch up to 50 repositories per GraphQL query
+- **Performance**: 46% fewer API calls in minimal mode (verified with 36 repos)
+- **Configuration**: `--graphql-batch-size` flag (default: 20)
+- **Implementation**: See `internal/ghapi/graphql_batching.go` - `GetBatchedRepoBasicDetails()`
+- **When to use**: Worker pool processing, minimal mode, selective field collection
+
+### Config Splitting Pattern
+```go
+// The batching implementation automatically extracts base fields
+// Base fields: Settings, CustomProps (cheap to fetch in batch)
+// Expensive fields: Collaborators, Rulesets, Milestones, etc. (fetched per-repo)
+
+// Define fetch config with all fields
+fetchConfig := ghapi.DataFetchConfig{
+    FetchSettings:      true,  // Always fetched in batch
+    FetchCustomProps:   true,  // Always fetched in batch
+    FetchLanguages:     true,  // Can be batched
+    FetchTopics:        true,  // Can be batched
+    FetchPRsData:       config.FetchPRsData,       // Fetched per-repo if true
+    FetchIssuesData:    config.FetchIssuesData,    // Fetched per-repo if true
+    FetchContributors:  config.FetchContributors,  // Fetched per-repo if true
+    FetchCollaborators: config.FetchCollaborators, // Expensive, per-repo
+    // ... other expensive fields
+}
+
+// GetBatchedRepoBasicDetails internally uses getBaseOnlyConfig() to extract base fields
+// ProcessRepoWithBasicData fetches expensive fields individually if needed
+```
+
+### Minimal Mode Override Pattern
+```go
+// When minimal flag is set, enable all --no-* flags first
+if minimal {
+    noContributors = true
+    noPRsData = true
+    // ... all other no-* flags
+}
+
+// Then apply CLI overrides (explicit flags take precedence)
+if cmd.Flags().Changed("no-packages") {
+    noPackages, _ = cmd.Flags().GetBool("no-packages")
+}
+
+// Convert to DataFetchConfig (negative flags → positive flags)
+DataFetchConfig: ghapi.DataFetchConfig{
+    FetchContributors: !noContributors,
+    FetchPRsData:      !noPRsData,
+    // ... etc
+}
+
+// Result: --minimal --no-packages=false fetches packages despite minimal mode
+```
+
+### New Helper Functions
+- `appendError(mu, errors, org, repo, err)` - Thread-safe error collection (in concurrency.go)
+- `GetBatchedRepoBasicDetails(ctx, org, repos, fetchConfig)` - Batch fetch repository base data (in graphql_batching.go)
+- `ProcessRepoWithBasicData(ctx, org, repo, basicData, packages, teams, fetchConfig)` - Process repo with pre-fetched batch data (in repos_metadata.go)
+- `getBaseOnlyConfig(config)` - Extract only base fields from config (internal, in graphql_batching.go)
+- `getExpensiveOnlyConfig(config)` - Extract only expensive fields from config (internal, in graphql_batching.go)
