@@ -10,6 +10,37 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      
+      - name: Create custom build script
+        run: |
+          cat > build.sh << 'EOF'
+          #!/bin/bash
+          set -e
+          
+          version="$1"
+          
+          platforms=(
+            darwin-amd64 darwin-arm64
+            freebsd-386 freebsd-amd64 freebsd-arm64
+            linux-386 linux-amd64 linux-arm linux-arm64
+            windows-386 windows-amd64 windows-arm64
+          )
+          
+          for p in "${platforms[@]}"; do
+            goos="${p%-*}"
+            goarch="${p#*-}"
+            ext=""
+            [ "$goos" = "windows" ] && ext=".exe"
+            
+            echo "Building for $goos/$goarch..."
+            GOOS="$goos" GOARCH="$goarch" go build -trimpath \
+              -ldflags="-s -w -X main.Version=$version" \
+              -o "dist/${p}${ext}"
+          done
+          EOF
+          chmod +x build.sh
+      
       - uses: cli/gh-extension-precompile@v2
         with:
           go_version: "1.24"
+          build_script_override: "build.sh"

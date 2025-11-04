@@ -24,6 +24,14 @@ import (
 	"github.com/pterm/pterm"
 )
 
+// unmarshalJSON unmarshals JSON data with consistent error messaging.
+func unmarshalJSON(data []byte, v interface{}, context string) error {
+	if err := json.Unmarshal(data, v); err != nil {
+		return fmt.Errorf("failed to unmarshal %s: %w", context, err)
+	}
+	return nil
+}
+
 // fetchOrgSecurityAndSettings fetches security managers, custom properties, and roles.
 func fetchOrgSecurityAndSettings(ctx context.Context, org string, verbose bool, orgMeta *output.OrgMetadata) {
 	if verbose {
@@ -193,316 +201,14 @@ func GetEnhancedOrgMetadata(ctx context.Context, org string, verbose bool, skipP
 
 // FetchOrgTeamsAccess fetches all team access data for an organization using GraphQL with pagination.
 // Returns a map of repo name -> team access data.
-func FetchOrgTeamsAccess(ctx context.Context, org string, verbose bool) (map[string][]output.RepoTeamAccess, error) {
-	repoTeamMap := make(map[string][]output.RepoTeamAccess)
-	var teamsCursor *string
-	teamsPage := 0
 
-	for {
-		teamsPage++
-		if err := state.Get().CheckRateLimit(1); err != nil {
-			return nil, fmt.Errorf("rate limit check failed on teams page %d: %w", teamsPage, err)
-		}
-
-		response, err := fetchTeamsPage(ctx, org, teamsCursor, teamsPage)
-		if err != nil {
-			return nil, err
-		}
-
-		if err := processTeamsPage(ctx, org, response.Data.Organization.Teams.Nodes, repoTeamMap, verbose); err != nil {
-			return nil, err
-		}
-
-		if !response.Data.Organization.Teams.PageInfo.HasNextPage {
-			break
-		}
-
-		teamsCursor = &response.Data.Organization.Teams.PageInfo.EndCursor
-
-		if verbose && teamsPage%5 == 0 {
-			pterm.Info.Printf("Fetched %d pages of teams for org %s...\n", teamsPage, org)
-		}
-	}
-
-	if verbose && teamsPage > 1 {
-		pterm.Success.Printf("Fetched all teams for org %s across %d pages\n", org, teamsPage)
-	}
-
-	return repoTeamMap, nil
-}
-
-// fetchTeamsPage fetches a single page of teams from GraphQL
-func fetchTeamsPage(ctx context.Context, org string, teamsCursor *string, teamsPage int) (*teamsGraphQLResponse, error) {
-	query := buildTeamsQuery(teamsCursor)
-	args := buildTeamsQueryArgs(query, org, teamsCursor)
-
-	cmd := exec.CommandContext(ctx, "gh", args...)
-	cmd.Env = os.Environ()
-
-	var out, errOut bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errOut
-
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("failed to fetch team access (page %d): %w (stderr: %s)", teamsPage, err, errOut.String())
-	}
-
-	state.Get().IncrementAPICalls()
-
-	var response teamsGraphQLResponse
-	if err := json.Unmarshal(out.Bytes(), &response); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal team access response (page %d): %w", teamsPage, err)
-	}
-
-	return &response, nil
-}
-
-// teamsGraphQLResponse defines the structure for teams query response
-type teamsGraphQLResponse struct {
-	Data struct {
-		Organization struct {
-			Teams struct {
-				PageInfo struct {
-					HasNextPage bool   `json:"hasNextPage"`
-					EndCursor   string `json:"endCursor"`
-				} `json:"pageInfo"`
-				Nodes []struct {
-					Name         string `json:"name"`
-					Slug         string `json:"slug"`
-					Repositories struct {
-						PageInfo struct {
-							HasNextPage bool   `json:"hasNextPage"`
-							EndCursor   string `json:"endCursor"`
-						} `json:"pageInfo"`
-						Edges []struct {
-							Permission string `json:"permission"`
-							Node       struct {
-								Name string `json:"name"`
-							} `json:"node"`
-						} `json:"edges"`
-					} `json:"repositories"`
-				} `json:"nodes"`
-			} `json:"teams"`
-		} `json:"organization"`
-	} `json:"data"`
-}
-
-// buildTeamsQuery builds the GraphQL query with or without cursor
-func buildTeamsQuery(teamsCursor *string) string {
-	if teamsCursor == nil {
-		return `query($org: String!) {
-			organization(login: $org) {
-				teams(first: 100) {
-					pageInfo { hasNextPage endCursor }
-					nodes {
-						name
-						slug
-						repositories(first: 100) {
-							pageInfo { hasNextPage endCursor }
-							edges {
-								permission
-								node { name }
-							}
-						}
-					}
-				}
-			}
-		}`
-	}
-	return `query($org: String!, $teamsCursor: String!) {
-		organization(login: $org) {
-			teams(first: 100, after: $teamsCursor) {
-				pageInfo { hasNextPage endCursor }
-				nodes {
-					name
-					slug
-					repositories(first: 100) {
-						pageInfo { hasNextPage endCursor }
-						edges {
-							permission
-							node { name }
-						}
-					}
-				}
-			}
-		}
-	}`
-}
-
-// buildTeamsQueryArgs builds the command arguments for the GraphQL query
-func buildTeamsQueryArgs(query, org string, teamsCursor *string) []string {
-	args := []string{"api", "graphql", "-f", fmt.Sprintf("query=%s", query), "-f", fmt.Sprintf("org=%s", org)}
-	if teamsCursor != nil {
-		args = append(args, "-f", fmt.Sprintf("teamsCursor=%s", *teamsCursor))
-	}
-	return args
-}
-
-// processTeamsPage processes all teams from a single page
-func processTeamsPage(ctx context.Context, org string, teams []struct {
-	Name         string `json:"name"`
-	Slug         string `json:"slug"`
-	Repositories struct {
-		PageInfo struct {
-			HasNextPage bool   `json:"hasNextPage"`
-			EndCursor   string `json:"endCursor"`
-		} `json:"pageInfo"`
-		Edges []struct {
-			Permission string `json:"permission"`
-			Node       struct {
-				Name string `json:"name"`
-			} `json:"node"`
-		} `json:"edges"`
-	} `json:"repositories"`
-}, repoTeamMap map[string][]output.RepoTeamAccess, verbose bool) error {
-	for _, team := range teams {
-		processTeamRepositories(team, repoTeamMap)
-
-		if team.Repositories.PageInfo.HasNextPage {
-			if err := fetchTeamRepositories(ctx, org, team.Name, team.Slug, team.Repositories.PageInfo.EndCursor, repoTeamMap, verbose); err != nil {
-				return fmt.Errorf("failed to fetch repositories for team %s: %w", team.Name, err)
-			}
-		}
-	}
-	return nil
-}
-
-// processTeamRepositories adds team access entries for all repositories in a team
-func processTeamRepositories(team struct {
-	Name         string `json:"name"`
-	Slug         string `json:"slug"`
-	Repositories struct {
-		PageInfo struct {
-			HasNextPage bool   `json:"hasNextPage"`
-			EndCursor   string `json:"endCursor"`
-		} `json:"pageInfo"`
-		Edges []struct {
-			Permission string `json:"permission"`
-			Node       struct {
-				Name string `json:"name"`
-			} `json:"node"`
-		} `json:"edges"`
-	} `json:"repositories"`
-}, repoTeamMap map[string][]output.RepoTeamAccess) {
-	for _, edge := range team.Repositories.Edges {
-		repoName := edge.Node.Name
-		access := output.RepoTeamAccess{
-			TeamName:   team.Name,
-			TeamSlug:   team.Slug,
-			Permission: strings.ToUpper(edge.Permission), // GraphQL returns lowercase, REST returns uppercase
-		}
-		repoTeamMap[repoName] = append(repoTeamMap[repoName], access)
-	}
-}
-
-// fetchTeamRepositories paginates through all repositories for a specific team.
-// Updates the repoTeamMap with team access data for remaining repositories.
-func fetchTeamRepositories(ctx context.Context, org, teamName, teamSlug, cursor string, repoTeamMap map[string][]output.RepoTeamAccess, verbose bool) error {
-	reposPage := 1 // Starting from page 2 since first page was already processed
-	currentCursor := cursor
-
-	for currentCursor != "" {
-		reposPage++
-		if err := state.Get().CheckRateLimit(1); err != nil {
-			return fmt.Errorf("rate limit check failed on team repos page %d: %w", reposPage, err)
-		}
-
-		query := `query($org: String!, $teamSlug: String!, $reposCursor: String!) {
-			organization(login: $org) {
-				team(slug: $teamSlug) {
-					repositories(first: 100, after: $reposCursor) {
-						pageInfo {
-							hasNextPage
-							endCursor
-						}
-						edges {
-							permission
-							node {
-								name
-							}
-						}
-					}
-				}
-			}
-		}`
-
-		cmd := exec.CommandContext(ctx, "gh", "api", "graphql",
-			"-f", fmt.Sprintf("query=%s", query),
-			"-f", fmt.Sprintf("org=%s", org),
-			"-f", fmt.Sprintf("teamSlug=%s", teamSlug),
-			"-f", fmt.Sprintf("reposCursor=%s", currentCursor))
-		cmd.Env = os.Environ()
-
-		var out bytes.Buffer
-		var errOut bytes.Buffer
-		cmd.Stdout = &out
-		cmd.Stderr = &errOut
-
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("failed to fetch repositories page %d: %w (stderr: %s)", reposPage, err, errOut.String())
-		}
-
-		state.Get().IncrementAPICalls()
-
-		var response struct {
-			Data struct {
-				Organization struct {
-					Team struct {
-						Repositories struct {
-							PageInfo struct {
-								HasNextPage bool   `json:"hasNextPage"`
-								EndCursor   string `json:"endCursor"`
-							} `json:"pageInfo"`
-							Edges []struct {
-								Permission string `json:"permission"`
-								Node       struct {
-									Name string `json:"name"`
-								} `json:"node"`
-							} `json:"edges"`
-						} `json:"repositories"`
-					} `json:"team"`
-				} `json:"organization"`
-			} `json:"data"`
-		}
-
-		if err := json.Unmarshal(out.Bytes(), &response); err != nil {
-			return fmt.Errorf("failed to unmarshal repositories response (page %d): %w", reposPage, err)
-		}
-
-		// Process repositories from this page
-		for _, edge := range response.Data.Organization.Team.Repositories.Edges {
-			repoName := edge.Node.Name
-			access := output.RepoTeamAccess{
-				TeamName:   teamName,
-				TeamSlug:   teamSlug,
-				Permission: strings.ToUpper(edge.Permission),
-			}
-			repoTeamMap[repoName] = append(repoTeamMap[repoName], access)
-		}
-
-		// Check if we need to fetch more repositories
-		if !response.Data.Organization.Team.Repositories.PageInfo.HasNextPage {
-			break
-		}
-
-		currentCursor = response.Data.Organization.Team.Repositories.PageInfo.EndCursor
-	}
-
-	if verbose && reposPage > 1 {
-		pterm.Info.Printf("Team '%s' has >100 repositories, fetched %d pages\n", teamName, reposPage)
-	}
-
-	return nil
-}
-
-// fetchOrgDetails fetches basic organization information.
 func fetchOrgDetails(ctx context.Context, org string) (output.OrgMetadata, error) {
 	if err := state.Get().CheckRateLimit(1); err != nil {
 		return output.OrgMetadata{}, fmt.Errorf("rate limit check failed: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/orgs/%s", org))
-	outputBytes, err := cmd.Output()
+	endpoint := fmt.Sprintf("/orgs/%s", org)
+	stdout, _, err := executeRESTCall(ctx, endpoint, false)
 	if err != nil {
 		return output.OrgMetadata{}, fmt.Errorf("failed to fetch org details: %w", err)
 	}
@@ -537,7 +243,7 @@ func fetchOrgDetails(ctx context.Context, org string) (output.OrgMetadata, error
 		WebCommitSignoffRequired      bool   `json:"web_commit_signoff_required"`
 	}
 
-	if err := json.Unmarshal(outputBytes, &apiResp); err != nil {
+	if err := json.Unmarshal([]byte(stdout), &apiResp); err != nil {
 		return output.OrgMetadata{}, fmt.Errorf("failed to unmarshal org details: %w", err)
 	}
 
@@ -576,12 +282,8 @@ func fetchOrgDetails(ctx context.Context, org string) (output.OrgMetadata, error
 
 // fetchSecurityManagers fetches teams designated as security managers.
 func fetchSecurityManagers(ctx context.Context, org string, verbose bool) ([]output.SecurityManager, error) {
-	if err := state.Get().CheckRateLimit(1); err != nil {
-		return nil, fmt.Errorf("rate limit check failed: %w", err)
-	}
-
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/orgs/%s/security-managers", org), "--paginate")
-	outputBytes, err := cmd.Output()
+	endpoint := fmt.Sprintf("/orgs/%s/security-managers", org)
+	outputStr, err := executeRESTPaginatedSimple(ctx, endpoint, verbose)
 	if err != nil {
 		// This might fail if the feature isn't available, that's okay
 		return nil, nil
@@ -593,7 +295,7 @@ func fetchSecurityManagers(ctx context.Context, org string, verbose bool) ([]out
 		Slug string `json:"slug"`
 	}
 
-	if err := json.Unmarshal(outputBytes, &apiResp); err != nil {
+	if err := json.Unmarshal([]byte(outputStr), &apiResp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal security managers: %w", err)
 	}
 
@@ -619,8 +321,8 @@ func fetchCustomProperties(ctx context.Context, org string, verbose bool) ([]out
 		return nil, fmt.Errorf("rate limit check failed: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/orgs/%s/properties/schema", org))
-	outputBytes, err := cmd.Output()
+	endpoint := fmt.Sprintf("/orgs/%s/properties/schema", org)
+	stdout, _, err := executeRESTCall(ctx, endpoint, verbose)
 	if err != nil {
 		// Feature may not be available
 		return nil, nil
@@ -635,7 +337,7 @@ func fetchCustomProperties(ctx context.Context, org string, verbose bool) ([]out
 		AllowedValues []string `json:"allowed_values"`
 	}
 
-	if err := json.Unmarshal(outputBytes, &apiResp); err != nil {
+	if err := json.Unmarshal([]byte(stdout), &apiResp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal custom properties: %w", err)
 	}
 
@@ -664,8 +366,8 @@ func fetchOrganizationRolesCount(ctx context.Context, org string) (int, error) {
 		return 0, fmt.Errorf("rate limit check failed: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/orgs/%s/organization-roles", org))
-	outputBytes, err := cmd.Output()
+	endpoint := fmt.Sprintf("/orgs/%s/organization-roles", org)
+	stdout, _, err := executeRESTCall(ctx, endpoint, false)
 	if err != nil {
 		// Feature may not be available
 		return 0, nil
@@ -677,7 +379,7 @@ func fetchOrganizationRolesCount(ctx context.Context, org string) (int, error) {
 		} `json:"roles"`
 	}
 
-	if err := json.Unmarshal(outputBytes, &apiResp); err != nil {
+	if err := json.Unmarshal([]byte(stdout), &apiResp); err != nil {
 		return 0, fmt.Errorf("failed to unmarshal organization roles: %w", err)
 	}
 
@@ -696,12 +398,8 @@ func fetchOutsideCollaboratorsCount(ctx context.Context, org string) (int, error
 
 // fetchTeamsCount fetches the count of teams in the organization.
 func fetchTeamsCount(ctx context.Context, org string) (int, error) {
-	if err := state.Get().CheckRateLimit(1); err != nil {
-		return 0, fmt.Errorf("rate limit check failed: %w", err)
-	}
-
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/orgs/%s/teams?per_page=1", org), "--paginate")
-	outputBytes, err := cmd.Output()
+	endpoint := fmt.Sprintf("/orgs/%s/teams?per_page=1", org)
+	outputStr, err := executeRESTPaginatedSimple(ctx, endpoint, false)
 	if err != nil {
 		return 0, fmt.Errorf("failed to fetch teams count: %w", err)
 	}
@@ -710,7 +408,7 @@ func fetchTeamsCount(ctx context.Context, org string) (int, error) {
 		ID int64 `json:"id"`
 	}
 
-	if err := json.Unmarshal(outputBytes, &apiResp); err != nil {
+	if err := json.Unmarshal([]byte(outputStr), &apiResp); err != nil {
 		return 0, fmt.Errorf("failed to unmarshal teams: %w", err)
 	}
 
@@ -723,17 +421,11 @@ func fetchOrgWebhooks(ctx context.Context, org string, verbose bool) ([]output.W
 		return nil, fmt.Errorf("rate limit check failed: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/orgs/%s/hooks", org), "--paginate")
-	cmd.Env = os.Environ()
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("failed to fetch webhooks: %w (stderr: %s)", err, stderr.String())
+	endpoint := fmt.Sprintf("/orgs/%s/hooks", org)
+	outputStr, err := executeRESTPaginatedSimple(ctx, endpoint, false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch webhooks: %w", err)
 	}
-
-	outputBytes := stdout.Bytes()
 
 	var apiResp []struct {
 		ID     int64    `json:"id"`
@@ -749,7 +441,7 @@ func fetchOrgWebhooks(ctx context.Context, org string, verbose bool) ([]output.W
 		UpdatedAt string `json:"updated_at"`
 	}
 
-	if err := json.Unmarshal(outputBytes, &apiResp); err != nil {
+	if err := json.Unmarshal([]byte(outputStr), &apiResp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal webhooks: %w", err)
 	}
 
@@ -783,12 +475,8 @@ func fetchOrgWebhooks(ctx context.Context, org string, verbose bool) ([]output.W
 
 // fetchActionsSecrets fetches Actions secrets (metadata only, not values).
 func fetchActionsSecrets(ctx context.Context, org string, verbose bool) ([]output.SecretMetadata, error) {
-	if err := state.Get().CheckRateLimit(1); err != nil {
-		return nil, fmt.Errorf("rate limit check failed: %w", err)
-	}
-
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/orgs/%s/actions/secrets", org), "--paginate")
-	outputBytes, err := cmd.Output()
+	endpoint := fmt.Sprintf("/orgs/%s/actions/secrets", org)
+	outputStr, err := executeRESTPaginatedSimple(ctx, endpoint, verbose)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch Actions secrets: %w", err)
 	}
@@ -802,7 +490,7 @@ func fetchActionsSecrets(ctx context.Context, org string, verbose bool) ([]outpu
 		} `json:"secrets"`
 	}
 
-	if err := json.Unmarshal(outputBytes, &apiResp); err != nil {
+	if err := json.Unmarshal([]byte(outputStr), &apiResp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Actions secrets: %w", err)
 	}
 
@@ -825,12 +513,8 @@ func fetchActionsSecrets(ctx context.Context, org string, verbose bool) ([]outpu
 
 // fetchActionsVariables fetches Actions variables.
 func fetchActionsVariables(ctx context.Context, org string, verbose bool) ([]output.Variable, error) {
-	if err := state.Get().CheckRateLimit(1); err != nil {
-		return nil, fmt.Errorf("rate limit check failed: %w", err)
-	}
-
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/orgs/%s/actions/variables", org), "--paginate")
-	outputBytes, err := cmd.Output()
+	endpoint := fmt.Sprintf("/orgs/%s/actions/variables", org)
+	outputStr, err := executeRESTPaginatedSimple(ctx, endpoint, verbose)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch Actions variables: %w", err)
 	}
@@ -845,7 +529,7 @@ func fetchActionsVariables(ctx context.Context, org string, verbose bool) ([]out
 		} `json:"variables"`
 	}
 
-	if err := json.Unmarshal(outputBytes, &apiResp); err != nil {
+	if err := json.Unmarshal([]byte(outputStr), &apiResp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Actions variables: %w", err)
 	}
 
@@ -873,8 +557,8 @@ func fetchOrgRulesets(ctx context.Context, org string, verbose bool) ([]output.R
 		return nil, fmt.Errorf("rate limit check failed: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/orgs/%s/rulesets", org), "--paginate")
-	outputBytes, err := cmd.Output()
+	endpoint := fmt.Sprintf("/orgs/%s/rulesets", org)
+	outputStr, err := executeRESTPaginatedSimple(ctx, endpoint, verbose)
 	if err != nil {
 		// Rulesets may not be available
 		return nil, nil
@@ -901,7 +585,7 @@ func fetchOrgRulesets(ctx context.Context, org string, verbose bool) ([]output.R
 		UpdatedAt string `json:"updated_at"`
 	}
 
-	if err := json.Unmarshal(outputBytes, &apiResp); err != nil {
+	if err := json.Unmarshal([]byte(outputStr), &apiResp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal rulesets: %w", err)
 	}
 
@@ -948,12 +632,8 @@ func fetchOrgRulesets(ctx context.Context, org string, verbose bool) ([]output.R
 
 // fetchRunnersCount fetches the total count of self-hosted runners across all groups.
 func fetchRunnersCount(ctx context.Context, org string) (int, error) {
-	if err := state.Get().CheckRateLimit(1); err != nil {
-		return 0, fmt.Errorf("rate limit check failed: %w", err)
-	}
-
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/orgs/%s/actions/runners?per_page=1", org), "--paginate")
-	outputBytes, err := cmd.Output()
+	endpoint := fmt.Sprintf("/orgs/%s/actions/runners?per_page=1", org)
+	outputStr, err := executeRESTPaginatedSimple(ctx, endpoint, false)
 	if err != nil {
 		return 0, fmt.Errorf("failed to fetch runners count: %w", err)
 	}
@@ -964,7 +644,7 @@ func fetchRunnersCount(ctx context.Context, org string) (int, error) {
 		} `json:"runners"`
 	}
 
-	if err := json.Unmarshal(outputBytes, &apiResp); err != nil {
+	if err := json.Unmarshal([]byte(outputStr), &apiResp); err != nil {
 		return 0, fmt.Errorf("failed to unmarshal runners: %w", err)
 	}
 
@@ -973,23 +653,11 @@ func fetchRunnersCount(ctx context.Context, org string) (int, error) {
 
 // fetchBlockedUsers fetches users blocked by the organization.
 func fetchBlockedUsers(ctx context.Context, org string) ([]output.BlockedUser, error) {
-	if err := state.Get().CheckRateLimit(1); err != nil {
-		return nil, fmt.Errorf("rate limit check failed: %w", err)
+	endpoint := fmt.Sprintf("/orgs/%s/blocks", org)
+	outputStr, err := executeRESTPaginatedSimple(ctx, endpoint, false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch blocked users: %w", err)
 	}
-
-	cmd := exec.CommandContext(ctx, "gh", "api", "--paginate", fmt.Sprintf("/orgs/%s/blocks", org))
-	cmd.Env = os.Environ()
-
-	var out bytes.Buffer
-	var errOut bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errOut
-
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("failed to fetch blocked users: %w (stderr: %s)", err, errOut.String())
-	}
-
-	state.Get().IncrementAPICalls()
 
 	var apiResp []struct {
 		Login     string `json:"login"`
@@ -1000,7 +668,7 @@ func fetchBlockedUsers(ctx context.Context, org string) ([]output.BlockedUser, e
 		SiteAdmin bool   `json:"site_admin"`
 	}
 
-	if err := json.Unmarshal(out.Bytes(), &apiResp); err != nil {
+	if err := json.Unmarshal([]byte(outputStr), &apiResp); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal blocked users: %w", err)
 	}
 
@@ -1021,23 +689,11 @@ func fetchBlockedUsers(ctx context.Context, org string) ([]output.BlockedUser, e
 
 // fetchGitHubAppsCount fetches the count of GitHub App installations for an organization.
 func fetchGitHubAppsCount(ctx context.Context, org string) (int, error) {
-	if err := state.Get().CheckRateLimit(1); err != nil {
-		return 0, fmt.Errorf("rate limit check failed: %w", err)
+	endpoint := fmt.Sprintf("/orgs/%s/installations", org)
+	outputStr, err := executeRESTPaginatedSimple(ctx, endpoint, false)
+	if err != nil {
+		return 0, fmt.Errorf("failed to fetch GitHub Apps: %w", err)
 	}
-
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/orgs/%s/installations", org), "--paginate")
-	cmd.Env = os.Environ()
-
-	var out bytes.Buffer
-	var errOut bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errOut
-
-	if err := cmd.Run(); err != nil {
-		return 0, fmt.Errorf("failed to fetch GitHub Apps: %w (stderr: %s)", err, errOut.String())
-	}
-
-	state.Get().IncrementAPICalls()
 
 	var apiResp struct {
 		TotalCount    int `json:"total_count"`
@@ -1046,7 +702,7 @@ func fetchGitHubAppsCount(ctx context.Context, org string) (int, error) {
 		} `json:"installations"`
 	}
 
-	if err := json.Unmarshal(out.Bytes(), &apiResp); err != nil {
+	if err := json.Unmarshal([]byte(outputStr), &apiResp); err != nil {
 		return 0, fmt.Errorf("failed to unmarshal GitHub Apps: %w", err)
 	}
 

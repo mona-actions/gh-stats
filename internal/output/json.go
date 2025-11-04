@@ -1,6 +1,6 @@
 // Package output provides JSON output functionality for repository statistics and package data.
 //
-// This package handles all file I/O operations for the gh-stats tool, including writing
+// This package handles all file I/O operations for the gh stats tool, including writing
 // consolidated JSON output, reading existing data for resume operations, and managing
 // incremental updates to output files.
 //
@@ -71,13 +71,13 @@ import (
 	"sync"
 )
 
-// fileMu serializes all file write operations to prevent concurrent writes
+// fileMu serializes all file write operations to prevent concurrent writes.
 // from multiple goroutines from corrupting the output file.
 // This mutex protects both WriteConsolidatedJSON and AppendToConsolidatedJSON.
 var fileMu sync.Mutex
 
-// cachedConsolidated holds cached consolidated stats alongside lookup maps so we can
-// reuse allocations across incremental writes. Access to this cache must occur while
+// cachedConsolidated holds cached consolidated stats alongside lookup maps so we can.
+// reuse allocations across incremental writes. Access to this cache must occur while.
 // fileMu is held to keep the in-memory state consistent with on-disk data.
 type cachedConsolidated struct {
 	stats      ConsolidatedStats
@@ -155,7 +155,7 @@ func writeConsolidatedJSONInternal(filePath string, stats ConsolidatedStats) (er
 // This function is thread-safe and uses atomic writes to prevent data corruption.
 //
 // Parameters:
-//   - filePath: Path to the consolidated JSON output file
+//   - filePath: Path to the consolidated JSON output file.
 //   - orgs: New organization metadata to append/update (nil-safe)
 //   - repos: New repository statistics to append/update (nil-safe)
 //   - packages: New package data to append/update (nil-safe)
@@ -166,21 +166,21 @@ func writeConsolidatedJSONInternal(filePath string, stats ConsolidatedStats) (er
 //   - Packages: Keyed by "Org/Repo/PackageName/PackageType" (updates replace existing)
 //
 // Returns:
-//   - nil on success
-//   - read error if existing file exists but cannot be parsed or read
-//   - write error if file cannot be written to disk
+//   - nil on success.
+//   - read error if existing file exists but cannot be parsed or read.
+//   - write error if file cannot be written to disk.
 //   - JSON marshal error if data cannot be converted to JSON
 //
 // Possible Errors:
-//   - os.ErrPermission if file permissions prevent read/write
-//   - os.ErrNotExist if parent directory doesn't exist
+//   - os.ErrPermission if file permissions prevent read/write.
+//   - os.ErrNotExist if parent directory doesn't exist.
 //   - json.SyntaxError if existing file contains malformed JSON
-//   - io.ErrShortWrite if disk is full during write
-//   - json.UnsupportedTypeError if data contains unmarshalable types
+//   - io.ErrShortWrite if disk is full during write.
+//   - json.UnsupportedTypeError if data contains unmarshalable types.
 //
 // Performance:
-//   - O(n) complexity where n = total items across all collections
-//   - Full file read + parse + write on every call
+//   - O(n) complexity where n = total items across all collections.
+//   - Full file read + parse + write on every call.
 //   - Not optimized for very large datasets (10,000+ items)
 func AppendToConsolidatedJSON(filePath string, orgs []OrgMetadata, repos []RepoStats, packages []PackageData) error {
 	// Serialize all file operations to prevent concurrent writes
@@ -235,7 +235,7 @@ func ReadConsolidatedJSON(filePath string) (ConsolidatedStats, error) {
 	return readConsolidatedJSONFromDisk(filePath)
 }
 
-// loadCachedConsolidatedLocked returns a cached consolidated stats entry, loading it
+// loadCachedConsolidatedLocked returns a cached consolidated stats entry, loading it.
 // from disk if necessary. fileMu must be held by the caller.
 func loadCachedConsolidatedLocked(filePath string) (*cachedConsolidated, error) {
 	if entry, ok := consolidatedCache[filePath]; ok {
@@ -270,6 +270,26 @@ func loadCachedConsolidatedLocked(filePath string) (*cachedConsolidated, error) 
 	return entry, nil
 }
 
+// readJSONFile reads a JSON file from disk, returning the raw bytes.
+// Returns an empty byte slice (not an error) if the file doesn't exist or is empty.
+// This is a helper to eliminate duplicate file reading logic.
+func readJSONFile(filePath string) ([]byte, error) {
+	if !fileExists(filePath) {
+		return []byte{}, nil
+	}
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read JSON file %s: %w", filePath, err)
+	}
+
+	if len(data) == 0 {
+		return []byte{}, nil
+	}
+
+	return data, nil
+}
+
 // readConsolidatedJSONFromDisk reads consolidated stats from disk without touching the cache.
 func readConsolidatedJSONFromDisk(filePath string) (ConsolidatedStats, error) {
 	result := ConsolidatedStats{
@@ -278,13 +298,9 @@ func readConsolidatedJSONFromDisk(filePath string) (ConsolidatedStats, error) {
 		Packages: []PackageData{},
 	}
 
-	if !fileExists(filePath) {
-		return result, nil
-	}
-
-	data, err := os.ReadFile(filePath)
+	data, err := readJSONFile(filePath)
 	if err != nil {
-		return result, fmt.Errorf("failed to read JSON file %s: %w", filePath, err)
+		return result, err
 	}
 
 	if len(data) == 0 {
@@ -305,17 +321,12 @@ func readConsolidatedJSONFromDisk(filePath string) (ConsolidatedStats, error) {
 func ReadExistingJSON(filePath string) (map[string]RepoStats, error) {
 	result := make(map[string]RepoStats)
 
-	// Check if file exists
-	if !fileExists(filePath) {
-		return result, nil
-	}
-
-	data, err := os.ReadFile(filePath)
+	data, err := readJSONFile(filePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read JSON file %s: %w", filePath, err)
+		return nil, err
 	}
 
-	// Parse JSON if file is not empty
+	// Return empty map if file is empty
 	if len(data) == 0 {
 		return result, nil
 	}
@@ -358,17 +369,12 @@ func ReadExistingJSON(filePath string) (map[string]RepoStats, error) {
 func ReadPackageDataJSON(filePath string) (map[string]PackageCounts, error) {
 	repoPackages := make(map[string]map[string]PackageData)
 
-	// Check if file exists
-	if !fileExists(filePath) {
-		return make(map[string]PackageCounts), nil
-	}
-
-	data, err := os.ReadFile(filePath)
+	data, err := readJSONFile(filePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read package JSON file: %w", err)
+		return nil, err
 	}
 
-	// Parse JSON if file is not empty
+	// Return empty map if file is empty
 	if len(data) == 0 {
 		return make(map[string]PackageCounts), nil
 	}

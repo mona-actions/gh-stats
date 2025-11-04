@@ -1,4 +1,21 @@
 // Package output provides JSON output functionality for repository statistics and package data.
+//
+// This file (models.go) defines all data structures used by the gh stats tool for representing
+// GitHub organization and repository metadata, statistics, and settings. These models are
+// designed to be serialized to JSON for output.
+//
+// Key features:
+//   - Comprehensive data models for organizations and repositories
+//   - JSON tag annotations for proper serialization
+//   - Structured types for nested data (webhooks, actions, security, etc.)
+//   - Optional fields marked with omitempty
+//   - Support for GitHub-specific concepts (teams, packages, environments, etc.)
+//
+// Data Structure Hierarchy:
+//   - OrgMetadata: Top-level organization information
+//   - RepoStats: Comprehensive repository data
+//   - PackageData: Package registry information
+//   - Various nested types for specific features (Actions, Security, Community, etc.)
 package output
 
 import (

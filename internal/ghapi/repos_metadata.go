@@ -1,100 +1,22 @@
+// Package ghapi provides GitHub API client functionality.
+//
+// This file (repos_metadata.go) contains REST API functions for fetching repository data.
+// It provides comprehensive functions to fetch repository metadata, settings,
+// automation data, security data, issues, PRs, and other repository features.
 package ghapi
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/mona-actions/gh-stats/internal/output"
 	"github.com/mona-actions/gh-stats/internal/state"
+	"github.com/pterm/pterm"
 )
 
-// DataFetchConfig controls which data to fetch to reduce API calls.
-//
-// Each boolean field enables or disables fetching a specific category of data.
-// This allows fine-grained control over API usage and execution time.
-//
-// Zero value behavior:
-//   - All boolean fields default to false (disabled)
-//   - Use DefaultDataFetchConfig() to get all features enabled
-//
-// Thread-safety: This type is safe for concurrent reads but should not be
-// modified after being passed to data fetching functions.
-//
-// Example:
-//
-//	config := DataFetchConfig{
-//	    FetchActions: true,   // Enable Actions data
-//	    FetchSecurity: true,  // Enable security scanning
-//	    // All other fields default to false (disabled)
-//	}
-type DataFetchConfig struct {
-	FetchSettings     bool
-	FetchCustomProps  bool
-	FetchBranches     bool
-	FetchWebhooks     bool
-	FetchAutolinks    bool
-	FetchActions      bool
-	FetchSecurity     bool
-	FetchPages        bool
-	FetchIssuesData   bool
-	FetchPRsData      bool
-	FetchTraffic      bool
-	FetchTags         bool
-	FetchGitRefs      bool
-	FetchLFS          bool
-	FetchFiles        bool
-	FetchContributors bool
-	FetchCommits      bool
-	FetchIssueEvents  bool
-}
-
-// DefaultDataFetchConfig returns a config with all features enabled
-func DefaultDataFetchConfig() DataFetchConfig {
-	return DataFetchConfig{
-		FetchSettings:     true,
-		FetchCustomProps:  true,
-		FetchBranches:     true,
-		FetchWebhooks:     true,
-		FetchAutolinks:    true,
-		FetchActions:      true,
-		FetchSecurity:     true,
-		FetchPages:        true,
-		FetchIssuesData:   true,
-		FetchPRsData:      true,
-		FetchTraffic:      true,
-		FetchTags:         true,
-		FetchGitRefs:      true,
-		FetchLFS:          true,
-		FetchFiles:        true,
-		FetchContributors: true,
-		FetchCommits:      true,
-		FetchIssueEvents:  true,
-	}
-}
-
-// GetIssueEventsCount gets the total count of issue events for a repository.
-//
-// This function uses the REST API with Link header parsing to efficiently determine
-// the total number of issue events without fetching all event data. It includes
-// retry logic, rate limit tracking, and proper error handling.
-//
-// Parameters:
-//   - ctx: Context for cancellation and timeout control
-//   - org: Organization name (repository owner)
-//   - repo: Repository name
-//
-// Returns:
-//   - int: Total count of issue events (0 if unable to fetch)
-//   - error: Only on critical failures; returns 0 count on non-critical errors
-//
-// Note: This is a non-critical metric - if rate limited or errors occur,
-// returns 0 instead of failing the entire repository processing.
 func GetIssueEventsCount(ctx context.Context, org, repo string) (int, error) {
 	endpoint := fmt.Sprintf("/repos/%s/%s/issues/events", org, repo)
 	count, err := getCountFromLinkHeader(ctx, endpoint)
@@ -105,6 +27,10 @@ func GetIssueEventsCount(ctx context.Context, org, repo string) (int, error) {
 	return count, nil
 }
 
+// ============================================================================
+// Phase 1: Repository Settings & Access Control Data Collection
+// ============================================================================
+
 // GetEnhancedRepoData fetches comprehensive repository-level data for migration.
 //
 // This function orchestrates the collection of repository data across multiple GitHub API
@@ -114,38 +40,38 @@ func GetIssueEventsCount(ctx context.Context, org, repo string) (int, error) {
 // Parameters:
 //   - ctx: Context for cancellation (respects parent timeout/cancellation)
 //   - org: Organization name (owner of the repository)
-//   - repo: Repository name
+//   - repo: Repository name.
 //   - teamAccessMap: Optional pre-fetched team access data (if nil, will fetch separately)
 //   - fetchConfig: Configuration controlling which data to fetch (feature flags)
 //
 // Returns:
-//   - *output.RepoStats: Comprehensive repository statistics and metadata
-//   - error: Only on critical failures that prevent basic repo information retrieval
+//   - *output.RepoStats: Comprehensive repository statistics and metadata.
+//   - error: Only on critical failures that prevent basic repo information retrieval.
 //
 // Error Handling Strategy:
-//   - Most API errors are logged as warnings but don't fail the operation
-//   - Only critical failures (unable to get core repo data) return errors
-//   - Non-critical failures (webhooks, actions, etc.) are logged and processing continues
-//   - This resilient approach ensures maximum data collection even with partial API failures
+//   - Most API errors are logged as warnings but don't fail the operation.
+//   - Only critical failures (unable to get core repo data) return errors.
+//   - Non-critical failures (webhooks, actions, etc.) are logged and processing continues.
+//   - This resilient approach ensures maximum data collection even with partial API failures.
 //
 // Possible Errors:
-//   - context.Canceled if operation is cancelled by user
-//   - context.DeadlineExceeded if operation times out
-//   - API authentication errors (401/403) if token lacks required permissions
+//   - context.Canceled if operation is cancelled by user.
+//   - context.DeadlineExceeded if operation times out.
+//   - API authentication errors (401/403) if token lacks required permissions.
 //   - API rate limit errors (though should be checked before calling this function)
-//   - Network errors for core repository data fetch
+//   - Network errors for core repository data fetch.
 //
 // Side Effects:
 //   - Makes multiple GitHub API calls (count varies based on fetchConfig)
-//   - Updates global API call counter
-//   - Prints warning messages to stdout for non-critical failures
-//   - May trigger rate limit consumption tracking
+//   - Updates global API call counter.
+//   - Prints warning messages to stdout for non-critical failures.
+//   - May trigger rate limit consumption tracking.
 //
 // fetchRepoSettingsAndAccess fetches repository settings and access control data.
 func fetchRepoSettingsAndAccess(ctx context.Context, org, repo string, teamAccessMap map[string][]output.RepoTeamAccess, fetchConfig DataFetchConfig, stats *output.RepoStats) {
 	if fetchConfig.FetchSettings {
 		if err := fetchRepoSettings(ctx, org, repo, stats); err != nil {
-			fmt.Printf(" WARNING Failed to fetch additional repo settings for %s/%s: %v\n", org, repo, err)
+			pterm.Warning.Printf("Failed to fetch additional repo settings for %s/%s: %v\n", org, repo, err)
 		}
 	}
 
@@ -155,39 +81,43 @@ func fetchRepoSettingsAndAccess(ctx context.Context, org, repo string, teamAcces
 			stats.TeamAccess = teamAccess
 		}
 	} else if err := fetchTeamAccess(ctx, org, repo, stats); err != nil {
-		fmt.Printf(" WARNING Failed to fetch team access for %s/%s: %v\n", org, repo, err)
+		pterm.Warning.Printf("Failed to fetch team access for %s/%s: %v\n", org, repo, err)
 	}
 
 	if fetchConfig.FetchCustomProps {
 		if err := fetchCustomPropertiesForRepo(ctx, org, repo, stats); err != nil {
-			fmt.Printf(" WARNING Failed to fetch custom properties for %s/%s: %v\n", org, repo, err)
+			pterm.Warning.Printf("Failed to fetch custom properties for %s/%s: %v\n", org, repo, err)
 		}
 	}
 
 	if fetchConfig.FetchBranches {
 		if err := fetchBranches(ctx, org, repo, stats); err != nil {
-			fmt.Printf(" WARNING Failed to fetch branches for %s/%s: %v\n", org, repo, err)
+			pterm.Warning.Printf("Failed to fetch branches for %s/%s: %v\n", org, repo, err)
 		}
 	}
 }
+
+// ============================================================================
+// Phase 2: Automation & CI/CD Data Collection
+// ============================================================================
 
 // fetchRepoAutomationData fetches webhooks, autolinks, and Actions data.
 func fetchRepoAutomationData(ctx context.Context, org, repo string, fetchConfig DataFetchConfig, stats *output.RepoStats) {
 	if fetchConfig.FetchWebhooks {
 		if err := fetchRepoWebhooks(ctx, org, repo, stats); err != nil {
-			fmt.Printf(" WARNING Failed to fetch webhooks for %s/%s: %v\n", org, repo, err)
+			pterm.Warning.Printf("Failed to fetch webhooks for %s/%s: %v\n", org, repo, err)
 		}
 	}
 
 	if fetchConfig.FetchAutolinks {
 		if err := fetchAutolinks(ctx, org, repo, stats); err != nil {
-			fmt.Printf(" WARNING Failed to fetch autolinks for %s/%s: %v\n", org, repo, err)
+			pterm.Warning.Printf("Failed to fetch autolinks for %s/%s: %v\n", org, repo, err)
 		}
 	}
 
 	if fetchConfig.FetchActions {
 		if err := fetchActionsData(ctx, org, repo, stats); err != nil {
-			fmt.Printf(" WARNING Failed to fetch Actions data for %s/%s: %v\n", org, repo, err)
+			pterm.Warning.Printf("Failed to fetch Actions data for %s/%s: %v\n", org, repo, err)
 		}
 	}
 }
@@ -196,7 +126,7 @@ func fetchRepoAutomationData(ctx context.Context, org, repo string, fetchConfig 
 func fetchRepoIssuesAndPRs(ctx context.Context, org, repo string, fetchConfig DataFetchConfig, stats *output.RepoStats) {
 	if fetchConfig.FetchSecurity {
 		if err := fetchSecurityData(ctx, org, repo, stats); err != nil {
-			fmt.Printf(" WARNING Failed to fetch security data for %s/%s: %v\n", org, repo, err)
+			pterm.Warning.Printf("Failed to fetch security data for %s/%s: %v\n", org, repo, err)
 		}
 	}
 
@@ -206,13 +136,13 @@ func fetchRepoIssuesAndPRs(ctx context.Context, org, repo string, fetchConfig Da
 
 	if fetchConfig.FetchIssuesData {
 		if err := fetchIssuesData(ctx, org, repo, stats); err != nil {
-			fmt.Printf(" WARNING Failed to fetch issues data for %s/%s: %v\n", org, repo, err)
+			pterm.Warning.Printf("Failed to fetch issues data for %s/%s: %v\n", org, repo, err)
 		}
 	}
 
 	if fetchConfig.FetchPRsData {
 		if err := fetchPullRequestsData(ctx, org, repo, stats); err != nil {
-			fmt.Printf(" WARNING Failed to fetch pull requests data for %s/%s: %v\n", org, repo, err)
+			pterm.Warning.Printf("Failed to fetch pull requests data for %s/%s: %v\n", org, repo, err)
 		}
 	}
 
@@ -273,14 +203,10 @@ func GetEnhancedRepoData(ctx context.Context, org, repo string, teamAccessMap ma
 func fetchRepoSettings(ctx context.Context, org, repo string, stats *output.RepoStats) error {
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s", org, repo))
-	cmd.Env = os.Environ()
-
-	var out bytes.Buffer
-	cmd.Stdout = &out
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to execute API request: %w", err)
+	endpoint := fmt.Sprintf("/repos/%s/%s", org, repo)
+	stdout, _, err := executeRESTCall(ctx, endpoint, false)
+	if err != nil {
+		return err
 	}
 
 	var apiResp struct {
@@ -299,8 +225,8 @@ func fetchRepoSettings(ctx context.Context, org, repo string, stats *output.Repo
 		WebCommitSignoffRequired bool   `json:"web_commit_signoff_required"`
 	}
 
-	if err := json.Unmarshal(out.Bytes(), &apiResp); err != nil {
-		return fmt.Errorf("failed to unmarshal API response: %w", err)
+	if err := unmarshalJSON([]byte(stdout), &apiResp, "settings API response"); err != nil {
+		return err
 	}
 
 	stats.Settings = &output.RepoSettings{
@@ -360,23 +286,19 @@ func fetchTeamAccess(ctx context.Context, org, repo string, stats *output.RepoSt
 }
 
 // fetchCustomPropertiesForRepo fetches custom property values for a repository.
+// Uses centralized retry logic from executeRESTCall.
 func fetchCustomPropertiesForRepo(ctx context.Context, org, repo string, stats *output.RepoStats) error {
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/properties/values", org, repo))
-	cmd.Env = os.Environ()
+	endpoint := fmt.Sprintf("/repos/%s/%s/properties/values", org, repo)
+	stdout, stderr, err := executeRESTCall(ctx, endpoint, false)
 
-	var out bytes.Buffer
-	var errOut bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errOut
-
-	if err := cmd.Run(); err != nil {
+	if err != nil {
 		// 404 is expected if no custom properties
-		if strings.Contains(errOut.String(), "404") {
+		if strings.Contains(stderr, "404") {
 			return nil
 		}
-		return fmt.Errorf("failed to execute API request: %w (stderr: %s)", err, errOut.String())
+		return err
 	}
 
 	var properties []struct {
@@ -384,8 +306,8 @@ func fetchCustomPropertiesForRepo(ctx context.Context, org, repo string, stats *
 		Value        interface{} `json:"value"`
 	}
 
-	if err := json.Unmarshal(out.Bytes(), &properties); err != nil {
-		return fmt.Errorf("failed to unmarshal API response: %w", err)
+	if err := unmarshalJSON([]byte(stdout), &properties, "custom properties API response"); err != nil {
+		return err
 	}
 
 	if len(properties) > 0 {
@@ -421,7 +343,8 @@ func fetchBranches(ctx context.Context, org, repo string, stats *output.RepoStat
 
 			// Fetch protection details if branch is protected
 			if b.Protected {
-				if protection, err := fetchBranchProtection(ctx, org, repo, b.Name); err == nil {
+				protection, err := fetchBranchProtection(ctx, org, repo, b.Name)
+				if err == nil {
 					branch.Protection = protection
 				}
 			}
@@ -444,15 +367,9 @@ func fetchBranches(ctx context.Context, org, repo string, stats *output.RepoStat
 func fetchBranchProtection(ctx context.Context, org, repo, branch string) (*output.BranchProtection, error) {
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/branches/%s/protection", org, repo, branch))
-	cmd.Env = os.Environ()
-
-	var out bytes.Buffer
-	var errOut bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errOut
-
-	if err := cmd.Run(); err != nil {
+	endpoint := fmt.Sprintf("/repos/%s/%s/branches/%s/protection", org, repo, branch)
+	stdout, _, err := executeRESTCall(ctx, endpoint, false)
+	if err != nil {
 		// Not all protected branches have detailed protection rules
 		return nil, err
 	}
@@ -493,8 +410,8 @@ func fetchBranchProtection(ctx context.Context, org, repo, branch string) (*outp
 		} `json:"allow_fork_syncing"`
 	}
 
-	if err := json.Unmarshal(out.Bytes(), &apiResp); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal API response: %w", err)
+	if err := unmarshalJSON([]byte(stdout), &apiResp, "branch protection API response"); err != nil {
+		return nil, err
 	}
 
 	protection := &output.BranchProtection{}
@@ -643,14 +560,10 @@ func fetchActionsData(ctx context.Context, org, repo string, stats *output.RepoS
 func fetchWorkflows(ctx context.Context, org, repo string, actions *output.RepoActions) error {
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/actions/workflows", org, repo))
-	cmd.Env = os.Environ()
-
-	var out bytes.Buffer
-	cmd.Stdout = &out
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to execute API request: %w", err)
+	endpoint := fmt.Sprintf("/repos/%s/%s/actions/workflows", org, repo)
+	stdout, _, err := executeRESTCall(ctx, endpoint, false)
+	if err != nil {
+		return err
 	}
 
 	var apiResp struct {
@@ -664,8 +577,8 @@ func fetchWorkflows(ctx context.Context, org, repo string, actions *output.RepoA
 		} `json:"workflows"`
 	}
 
-	if err := json.Unmarshal(out.Bytes(), &apiResp); err != nil {
-		return fmt.Errorf("failed to unmarshal API response: %w", err)
+	if err := unmarshalJSON([]byte(stdout), &apiResp, "workflows API response"); err != nil {
+		return err
 	}
 
 	// Set count instead of detailed workflows
@@ -677,22 +590,18 @@ func fetchWorkflows(ctx context.Context, org, repo string, actions *output.RepoA
 func fetchActionsSecretsRepo(ctx context.Context, org, repo string, actions *output.RepoActions) error {
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/actions/secrets", org, repo))
-	cmd.Env = os.Environ()
-
-	var out bytes.Buffer
-	cmd.Stdout = &out
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to execute API request: %w", err)
+	endpoint := fmt.Sprintf("/repos/%s/%s/actions/secrets", org, repo)
+	stdout, _, err := executeRESTCall(ctx, endpoint, false)
+	if err != nil {
+		return err
 	}
 
 	var apiResp struct {
 		Secrets []output.SecretMetadata `json:"secrets"`
 	}
 
-	if err := json.Unmarshal(out.Bytes(), &apiResp); err != nil {
-		return fmt.Errorf("failed to unmarshal API response: %w", err)
+	if err := unmarshalJSON([]byte(stdout), &apiResp, "secrets API response"); err != nil {
+		return err
 	}
 
 	actions.Secrets = apiResp.Secrets
@@ -704,22 +613,18 @@ func fetchActionsSecretsRepo(ctx context.Context, org, repo string, actions *out
 func fetchActionsVariablesRepo(ctx context.Context, org, repo string, actions *output.RepoActions) error {
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/actions/variables", org, repo))
-	cmd.Env = os.Environ()
-
-	var out bytes.Buffer
-	cmd.Stdout = &out
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to execute API request: %w", err)
+	endpoint := fmt.Sprintf("/repos/%s/%s/actions/variables", org, repo)
+	stdout, _, err := executeRESTCall(ctx, endpoint, false)
+	if err != nil {
+		return err
 	}
 
 	var apiResp struct {
 		Variables []output.Variable `json:"variables"`
 	}
 
-	if err := json.Unmarshal(out.Bytes(), &apiResp); err != nil {
-		return fmt.Errorf("failed to unmarshal API response: %w", err)
+	if err := unmarshalJSON([]byte(stdout), &apiResp, "variables API response"); err != nil {
+		return err
 	}
 
 	actions.Variables = apiResp.Variables
@@ -731,14 +636,10 @@ func fetchActionsVariablesRepo(ctx context.Context, org, repo string, actions *o
 func fetchRunnersRepo(ctx context.Context, org, repo string, actions *output.RepoActions) error {
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/actions/runners", org, repo))
-	cmd.Env = os.Environ()
-
-	var out bytes.Buffer
-	cmd.Stdout = &out
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to execute API request: %w", err)
+	endpoint := fmt.Sprintf("/repos/%s/%s/actions/runners", org, repo)
+	stdout, _, err := executeRESTCall(ctx, endpoint, false)
+	if err != nil {
+		return err
 	}
 
 	var apiResp struct {
@@ -747,8 +648,8 @@ func fetchRunnersRepo(ctx context.Context, org, repo string, actions *output.Rep
 		} `json:"runners"`
 	}
 
-	if err := json.Unmarshal(out.Bytes(), &apiResp); err != nil {
-		return fmt.Errorf("failed to unmarshal API response: %w", err)
+	if err := unmarshalJSON([]byte(stdout), &apiResp, "runners API response"); err != nil {
+		return err
 	}
 
 	actions.RunnersCount = len(apiResp.Runners)
@@ -759,13 +660,9 @@ func fetchRunnersRepo(ctx context.Context, org, repo string, actions *output.Rep
 func fetchCacheUsage(ctx context.Context, org, repo string, actions *output.RepoActions) error {
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/actions/cache/usage", org, repo))
-	cmd.Env = os.Environ()
-
-	var out bytes.Buffer
-	cmd.Stdout = &out
-
-	if err := cmd.Run(); err != nil {
+	endpoint := fmt.Sprintf("/repos/%s/%s/actions/cache/usage", org, repo)
+	stdout, _, err := executeRESTCall(ctx, endpoint, false)
+	if err != nil {
 		return err
 	}
 
@@ -774,8 +671,8 @@ func fetchCacheUsage(ctx context.Context, org, repo string, actions *output.Repo
 		ActiveCachesCount       int   `json:"active_caches_count"`
 	}
 
-	if err := json.Unmarshal(out.Bytes(), &apiResp); err != nil {
-		return fmt.Errorf("failed to unmarshal API response: %w", err)
+	if err := unmarshalJSON([]byte(stdout), &apiResp, "cache usage API response"); err != nil {
+		return err
 	}
 
 	actions.CacheUsage = &output.CacheUsage{
@@ -805,13 +702,10 @@ func fetchSecurityData(ctx context.Context, org, repo string, stats *output.Repo
 func fetchDependabotData(ctx context.Context, org, repo string, security *output.RepoSecurity) error {
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/vulnerability-alerts", org, repo))
-	cmd.Env = os.Environ()
+	endpoint := fmt.Sprintf("/repos/%s/%s/vulnerability-alerts", org, repo)
+	_, _, err := executeRESTCall(ctx, endpoint, false)
 
-	var errOut bytes.Buffer
-	cmd.Stderr = &errOut
-
-	enabled := cmd.Run() == nil
+	enabled := err == nil
 
 	dependabot := &output.DependabotConfig{
 		Enabled: enabled,
@@ -819,12 +713,14 @@ func fetchDependabotData(ctx context.Context, org, repo string, security *output
 
 	// Fetch Dependabot alerts if enabled
 	if enabled {
-		if alertCounts, err := fetchDependabotAlerts(ctx, org, repo); err == nil {
+		alertCounts, err := fetchDependabotAlerts(ctx, org, repo)
+		if err == nil {
 			dependabot.AlertCounts = alertCounts
 		}
 
 		// Fetch Dependabot secrets
-		if secrets, err := fetchDependabotSecrets(ctx, org, repo); err == nil {
+		secrets, err := fetchDependabotSecrets(ctx, org, repo)
+		if err == nil {
 			dependabot.Secrets = secrets
 		}
 	}
@@ -892,13 +788,9 @@ func fetchDependabotAlerts(ctx context.Context, org, repo string) (*output.Alert
 func fetchDependabotSecrets(ctx context.Context, org, repo string) ([]output.SecretMetadata, error) {
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/dependabot/secrets", org, repo))
-	cmd.Env = os.Environ()
-
-	var out bytes.Buffer
-	cmd.Stdout = &out
-
-	if err := cmd.Run(); err != nil {
+	endpoint := fmt.Sprintf("/repos/%s/%s/dependabot/secrets", org, repo)
+	stdout, _, err := executeRESTCall(ctx, endpoint, false)
+	if err != nil {
 		return nil, err
 	}
 
@@ -906,7 +798,7 @@ func fetchDependabotSecrets(ctx context.Context, org, repo string) ([]output.Sec
 		Secrets []output.SecretMetadata `json:"secrets"`
 	}
 
-	if err := json.Unmarshal(out.Bytes(), &apiResp); err != nil {
+	if err := unmarshalJSON([]byte(stdout), &apiResp, "dependabot secrets API response"); err != nil {
 		return nil, err
 	}
 
@@ -918,22 +810,17 @@ func fetchCodeScanningData(ctx context.Context, org, repo string, security *outp
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
 	// Fetch code scanning default setup
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/code-scanning/default-setup", org, repo))
-	cmd.Env = os.Environ()
-
-	var out bytes.Buffer
-	var errOut bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errOut
+	endpoint := fmt.Sprintf("/repos/%s/%s/code-scanning/default-setup", org, repo)
+	stdout, _, err := executeRESTCall(ctx, endpoint, false)
 
 	codeScanning := &output.CodeScanningConfig{}
 
-	if err := cmd.Run(); err == nil {
+	if err == nil {
 		var apiResp struct {
 			State string `json:"state"`
 		}
 
-		if err := json.Unmarshal(out.Bytes(), &apiResp); err == nil {
+		if err := json.Unmarshal([]byte(stdout), &apiResp); err == nil {
 			codeScanning.DefaultSetup = apiResp.State
 		}
 	}
@@ -1097,17 +984,15 @@ func fetchSecurityAdvisories(ctx context.Context, org, repo string, security *ou
 func fetchPages(ctx context.Context, org, repo string, stats *output.RepoStats) error {
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/pages", org, repo))
-	cmd.Env = os.Environ()
+	endpoint := fmt.Sprintf("/repos/%s/%s/pages", org, repo)
+	stdout, stderr, err := executeRESTCall(ctx, endpoint, false)
 
-	var out bytes.Buffer
-	var errOut bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errOut
-
-	if err := cmd.Run(); err != nil {
+	if err != nil {
 		// 404 is expected if no Pages
-		return nil
+		if strings.Contains(stderr, "404") {
+			return nil
+		}
+		return err
 	}
 
 	var apiResp struct {
@@ -1127,8 +1012,8 @@ func fetchPages(ctx context.Context, org, repo string, stats *output.RepoStats) 
 		} `json:"https_certificate"`
 	}
 
-	if err := json.Unmarshal(out.Bytes(), &apiResp); err != nil {
-		return fmt.Errorf("failed to unmarshal API response: %w", err)
+	if err := unmarshalJSON([]byte(stdout), &apiResp, "pages API response"); err != nil {
+		return err
 	}
 
 	stats.Pages = &output.PagesConfig{
@@ -1158,7 +1043,7 @@ func fetchPages(ctx context.Context, org, repo string, stats *output.RepoStats) 
 }
 
 // ============================================================================
-// Phase 3: Issues & Pull Requests Data Collection
+// Phase 3: Issues & Pull Requests Data Collection.
 // ============================================================================
 
 // fetchIssuesData fetches comprehensive issue statistics including labels and milestones.
@@ -1190,15 +1075,12 @@ func fetchIssueCounts(ctx context.Context, org, repo string, issuesData *output.
 
 	// Fetch issue counts using search API for efficiency
 	// Get open issues
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/issues?state=open&per_page=1", org, repo))
-	cmd.Env = os.Environ()
+	endpoint := fmt.Sprintf("/repos/%s/%s/issues?state=open&per_page=1", org, repo)
+	stdout, _, err := executeRESTCall(ctx, endpoint, false)
 
-	var out bytes.Buffer
-	cmd.Stdout = &out
-
-	if err := cmd.Run(); err == nil {
+	if err == nil {
 		var openIssues []map[string]interface{}
-		if err := json.Unmarshal(out.Bytes(), &openIssues); err == nil {
+		if err := json.Unmarshal([]byte(stdout), &openIssues); err == nil {
 			// Get the total count from a separate call
 			issuesData.OpenCount = countIssues(ctx, org, repo, "open")
 		}
@@ -1423,7 +1305,7 @@ func formatDuration(hours float64) string {
 }
 
 // ============================================================================
-// Phase 4: Additional Data Points Collection
+// Phase 4: Additional Data Points Collection.
 // ============================================================================
 
 // fetchTrafficData fetches repository traffic data (views and clones).
@@ -1452,15 +1334,9 @@ func fetchTrafficData(ctx context.Context, org, repo string, stats *output.RepoS
 func fetchTrafficViews(ctx context.Context, org, repo string) (*output.TrafficStats, error) {
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/traffic/views", org, repo))
-	cmd.Env = os.Environ()
-
-	var out bytes.Buffer
-	var errOut bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errOut
-
-	if err := cmd.Run(); err != nil {
+	endpoint := fmt.Sprintf("/repos/%s/%s/traffic/views", org, repo)
+	stdout, _, err := executeRESTCall(ctx, endpoint, false)
+	if err != nil {
 		return nil, err
 	}
 
@@ -1474,8 +1350,8 @@ func fetchTrafficViews(ctx context.Context, org, repo string) (*output.TrafficSt
 		} `json:"views"`
 	}
 
-	if err := json.Unmarshal(out.Bytes(), &apiResp); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal API response: %w", err)
+	if err := unmarshalJSON([]byte(stdout), &apiResp, "traffic views API response"); err != nil {
+		return nil, err
 	}
 
 	trafficStats := &output.TrafficStats{
@@ -1498,15 +1374,9 @@ func fetchTrafficViews(ctx context.Context, org, repo string) (*output.TrafficSt
 func fetchTrafficClones(ctx context.Context, org, repo string) (*output.TrafficStats, error) {
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/traffic/clones", org, repo))
-	cmd.Env = os.Environ()
-
-	var out bytes.Buffer
-	var errOut bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errOut
-
-	if err := cmd.Run(); err != nil {
+	endpoint := fmt.Sprintf("/repos/%s/%s/traffic/clones", org, repo)
+	stdout, _, err := executeRESTCall(ctx, endpoint, false)
+	if err != nil {
 		return nil, err
 	}
 
@@ -1520,8 +1390,8 @@ func fetchTrafficClones(ctx context.Context, org, repo string) (*output.TrafficS
 		} `json:"clones"`
 	}
 
-	if err := json.Unmarshal(out.Bytes(), &apiResp); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal API response: %w", err)
+	if err := unmarshalJSON([]byte(stdout), &apiResp, "traffic clones API response"); err != nil {
+		return nil, err
 	}
 
 	trafficStats := &output.TrafficStats{
@@ -1541,7 +1411,7 @@ func fetchTrafficClones(ctx context.Context, org, repo string) (*output.TrafficS
 }
 
 // ============================================================================
-// Phase 5: Deployment & Git Metadata Collection
+// Phase 5: Deployment & Git Metadata Collection.
 // ============================================================================
 
 // fetchTagsDetailed fetches detailed tag information.
@@ -1609,15 +1479,10 @@ func fetchGitReferences(ctx context.Context, org, repo string, stats *output.Rep
 func fetchGitLFSStatus(ctx context.Context, org, repo string, stats *output.RepoStats) error {
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/lfs", org, repo))
-	cmd.Env = os.Environ()
+	endpoint := fmt.Sprintf("/repos/%s/%s/lfs", org, repo)
+	stdout, _, err := executeRESTCall(ctx, endpoint, false)
 
-	var out bytes.Buffer
-	var errOut bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errOut
-
-	if err := cmd.Run(); err != nil {
+	if err != nil {
 		// If endpoint doesn't exist or returns error, assume LFS is not enabled
 		enabled := false
 		stats.GitLFSEnabled = &enabled
@@ -1628,7 +1493,7 @@ func fetchGitLFSStatus(ctx context.Context, org, repo string, stats *output.Repo
 		Enabled bool `json:"enabled"`
 	}
 
-	if err := json.Unmarshal(out.Bytes(), &apiResp); err != nil {
+	if err := unmarshalJSON([]byte(stdout), &apiResp, "LFS API response"); err != nil {
 		// If we can't parse, assume not enabled
 		enabled := false
 		stats.GitLFSEnabled = &enabled
@@ -1673,15 +1538,9 @@ func fetchRepoFiles(ctx context.Context, org, repo string, stats *output.RepoSta
 func fetchFileContent(ctx context.Context, org, repo, path string) (*output.RepoFileContent, error) {
 	_ = state.Get().CheckRateLimit(1) // Error handled internally
 
-	cmd := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("/repos/%s/%s/contents/%s", org, repo, path))
-	cmd.Env = os.Environ()
-
-	var out bytes.Buffer
-	var errOut bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errOut
-
-	if err := cmd.Run(); err != nil {
+	endpoint := fmt.Sprintf("/repos/%s/%s/contents/%s", org, repo, path)
+	stdout, _, err := executeRESTCall(ctx, endpoint, false)
+	if err != nil {
 		return nil, err
 	}
 
@@ -1697,7 +1556,7 @@ func fetchFileContent(ctx context.Context, org, repo, path string) (*output.Repo
 		// Omit content field to avoid storing base64 encoded file content
 	}
 
-	if err := json.Unmarshal(out.Bytes(), &apiResp); err != nil {
+	if err := unmarshalJSON([]byte(stdout), &apiResp, "file content API response"); err != nil {
 		return nil, err
 	}
 
@@ -1714,7 +1573,7 @@ func fetchFileContent(ctx context.Context, org, repo, path string) (*output.Repo
 }
 
 // ============================================================================
-// Phase 6: Additional Engagement Metrics
+// Phase 6: Additional Engagement Metrics.
 // ============================================================================
 
 // fetchContributorsCount fetches the count of contributors to a repository.

@@ -22,8 +22,6 @@ vendor/
 
 # Output files
 *.json
-*.csv
-repo-stats-*.csv
 gh-stats-*.json
 
 # IDE and editor files

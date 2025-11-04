@@ -1,17 +1,17 @@
 // Package stats implements concurrent processing of GitHub repository statistics.
 //
-// This file (processor.go) contains the main orchestration logic for stats collection.
+// This file (processor.go) contains the main orchestration logic for the gh stats tool.
 // It coordinates the entire data collection process from validation through final output,
 // managing multiple organizations, rate limits, and error handling.
 //
 // Key features:
-//   - Multi-organization sequential processing
-//   - Per-organization parallel repository processing
-//   - Automatic resume from interrupted operations
-//   - Dry-run mode for preview and API estimation
-//   - Rate limit checking and reporting
-//   - Comprehensive error aggregation
-//   - Context-aware cancellation support
+//   - Multi-organization sequential processing.
+//   - Per-organization parallel repository processing.
+//   - Automatic resume from interrupted operations.
+//   - Dry-run mode for preview and API estimation.
+//   - Rate limit checking and reporting.
+//   - Comprehensive error aggregation.
+//   - Context-aware cancellation support.
 package stats
 
 import (
@@ -52,35 +52,21 @@ const (
 //	    FetchSecurity: true, // Enable security data collection
 //	}
 type Config struct {
-	OrgName    string // Organization name to analyze (mutually exclusive with InputFile)
-	InputFile  string // File with list of organizations to analyze (mutually exclusive with OrgName)
-	OutputFile string // Output file path for results (JSON format)
-	MaxWorkers int    // Maximum number of concurrent API calls (default: 3)
-	FailFast   bool   // Stop processing on first error
-	Verbose    bool   // Enable verbose output and debug information
-	Resume     bool   // Resume from existing output file, skipping already processed repositories
-	DryRun     bool   // Show what would be collected without making API calls (preview mode)
-	NoPackages bool   // Skip fetching package data for faster execution
+	OrgName          string // Organization name to analyze (mutually exclusive with InputFile)
+	InputFile        string // File with list of organizations to analyze (mutually exclusive with OrgName)
+	OutputFile       string // Output file path for results (JSON format)
+	Version          string // Version string for display in banner (set by main package)
+	MaxWorkers       int    // Maximum number of concurrent API calls (default: 3)
+	GraphQLBatchSize int    // Number of repos to fetch per GraphQL query (default: 20, max: 50)
+	FailFast         bool   // Stop processing on first error
+	Verbose          bool   // Enable verbose output and debug information
+	Resume           bool   // Resume from existing output file, skipping already processed repositories
+	DryRun           bool   // Show what would be collected without making API calls (preview mode)
+	NoPackages       bool   // Skip fetching package data for faster execution
+	NoTeams          bool   // Skip fetching team access data (significant API savings for large orgs)
 
-	// Feature flags to control which data to fetch (reduces API calls)
-	FetchSettings     bool // Fetch additional repo settings (default: true)
-	FetchCustomProps  bool // Fetch custom properties (default: true)
-	FetchBranches     bool // Fetch detailed branch protection (default: true)
-	FetchWebhooks     bool // Fetch webhooks (default: true)
-	FetchAutolinks    bool // Fetch autolinks (default: true)
-	FetchActions      bool // Fetch Actions data (workflows, secrets, variables, runners, cache) (default: true)
-	FetchSecurity     bool // Fetch security data (Dependabot, code scanning, secret scanning) (default: true)
-	FetchPages        bool // Fetch GitHub Pages config (default: true)
-	FetchIssuesData   bool // Fetch issues metadata (default: true)
-	FetchPRsData      bool // Fetch pull requests metadata (default: true)
-	FetchTraffic      bool // Fetch traffic stats (default: true)
-	FetchTags         bool // Fetch detailed tag info (default: true)
-	FetchGitRefs      bool // Fetch git references (default: true)
-	FetchLFS          bool // Fetch LFS status (default: true)
-	FetchFiles        bool // Fetch repository files (default: true)
-	FetchContributors bool // Fetch contributors count (default: true)
-	FetchCommits      bool // Fetch commit count (default: true)
-	FetchIssueEvents  bool // Fetch issue events count (default: true)
+	// Embed DataFetchConfig to avoid field duplication
+	ghapi.DataFetchConfig
 }
 
 // RunWithContext orchestrates org/repo processing with context support for cancellation.
@@ -147,14 +133,13 @@ func loadExistingData(config Config) (map[string]output.RepoStats, error) {
 	// Always try to read existing data to enable automatic resume
 	existingStats, err = output.ReadExistingJSON(config.OutputFile)
 	if err != nil {
-		if config.Resume {
-			// User explicitly requested resume but file is unreadable - this is an error
-			pterm.Warning.Printf("Could not read existing data for resume: %v\n", err)
-			pterm.Warning.Println("Starting fresh collection (existing file may be corrupted)")
+		// File doesn't exist or is corrupted - start fresh
+		if config.Verbose {
+			pterm.Debug.Printf("No existing data to resume from: %v\n", err)
 		}
 		existingStats = make(map[string]output.RepoStats)
 	} else if len(existingStats) > 0 {
-		pterm.Info.Printf("Found %d already processed repositories in %s (will skip)\n", len(existingStats), config.OutputFile)
+		pterm.Info.Printf("Found %d repositories in %s (will skip)\n", len(existingStats), config.OutputFile)
 	}
 
 	return existingStats, nil
@@ -202,18 +187,46 @@ func checkRateLimitWithRetry(config Config) error {
 	return fmt.Errorf("rate limit check failed after %d retries", maxRateLimitRetries)
 }
 
+// printBanner displays the gh-stats startup banner with version information.
+// The banner uses ASCII art and pterm styling for a professional appearance.
+func printBanner(version string) {
+	if version == "" {
+		version = "dev"
+	}
+
+	banner := fmt.Sprintf(`
+    ██████╗ ██╗  ██╗    ███████╗████████╗ █████╗ ████████╗███████╗   
+   ██╔════╝ ██║  ██║    ██╔════╝╚══██╔══╝██╔══██╗╚══██╔══╝██╔════╝   
+   ██║  ███╗███████║    ███████╗   ██║   ███████║   ██║   ███████╗   
+   ██║   ██║██╔══██║    ╚════██║   ██║   ██╔══██║   ██║   ╚════██║   
+   ╚██████╔╝██║  ██║    ███████║   ██║   ██║  ██║   ██║   ███████║   
+    ╚═════╝ ╚═╝  ╚═╝    ╚══════╝   ╚═╝   ╚═╝  ╚═╝   ╚═╝   ╚══════╝   
+   📦 GitHub Stats Collector • %s
+`, version)
+
+	pterm.DefaultBox.WithBoxStyle(pterm.NewStyle(pterm.FgCyan)).
+		WithHorizontalString("═").
+		WithVerticalString("║").
+		Println(banner)
+	fmt.Println()
+}
+
 // RunWithContext orchestrates the statistics collection process for organizations.
 // processOrganization processes a single organization, including metadata and repositories.
 func processOrganization(ctx context.Context, org string, config Config, existingStats map[string]output.RepoStats) error {
-	state.Get().PrintOrg(org)
+	// Print organization header
+	output.PrintOrgHeader(org)
 
 	// Check rate limit
 	if err := checkRateLimitWithRetry(config); err != nil {
 		return fmt.Errorf("rate limit check failed for org %s: %w", org, err)
 	}
 
-	// Fetch org metadata
+	// Fetch org metadata with spinner
+	spinner, _ := pterm.DefaultSpinner.WithRemoveWhenDone(true).Start("Fetching organization metadata...")
 	orgMeta, err := ghapi.GetEnhancedOrgMetadata(ctx, org, config.Verbose, config.NoPackages)
+	_ = spinner.Stop()
+
 	if err != nil {
 		pterm.Warning.Printf("Failed to fetch org metadata for %s: %v\n", org, err)
 		orgMeta = output.OrgMetadata{
@@ -222,11 +235,30 @@ func processOrganization(ctx context.Context, org string, config Config, existin
 		}
 	}
 
+	// Print org metadata summary (non-verbose mode)
+	if !config.Verbose {
+		output.PrintOrgMetadata(output.OrgMetadataDisplay{
+			SecurityManagers:  len(orgMeta.SecurityManagers),
+			CustomProperties:  len(orgMeta.CustomProperties),
+			Members:           orgMeta.MembersCount,
+			OutsideCollabs:    orgMeta.OutsideCollaboratorsCount,
+			Teams:             orgMeta.TeamsCount,
+			Secrets:           len(orgMeta.ActionsSecrets),
+			Variables:         len(orgMeta.ActionsVariables),
+			Rulesets:          len(orgMeta.Rulesets),
+			SelfHostedRunners: orgMeta.RunnersCount,
+			BlockedUsers:      len(orgMeta.BlockedUsers),
+			Webhooks:          len(orgMeta.Webhooks),
+			SkippedPackages:   config.NoPackages,
+		})
+	} else {
+		pterm.Success.Println("✅ Organization metadata saved")
+		pterm.Println()
+	}
+
 	// Save org metadata
 	if err := output.AppendToConsolidatedJSON(config.OutputFile, []output.OrgMetadata{orgMeta}, nil, nil); err != nil {
 		pterm.Warning.Printf("Failed to save org metadata for %s: %v\n", org, err)
-	} else {
-		pterm.Success.Printf("✓ Saved comprehensive org data for %s\n", org)
 	}
 
 	// Process repositories
@@ -245,12 +277,15 @@ func processOrganization(ctx context.Context, org string, config Config, existin
 		pterm.Debug.Printf("Updated org metadata with aggregated totals: %d deploy keys\n", orgMeta.TotalDeployKeysCount)
 	}
 
-	pterm.Success.Printf("✓ Completed %s\n", org)
+	// Completion message removed - shown in MarkDoneWithSummary() instead
 	return nil
 }
 
 // RunWithContext orchestrates the statistics collection process for organizations.
 func RunWithContext(ctx context.Context, config Config) error {
+	// Display startup banner
+	printBanner(config.Version)
+
 	if err := setupAndValidate(&config); err != nil {
 		return err
 	}
@@ -258,6 +293,9 @@ func RunWithContext(ctx context.Context, config Config) error {
 	if config.DryRun {
 		return runDryRun(config)
 	}
+
+	// Track start time for duration calculation
+	startTime := time.Now()
 
 	ghapi.UpdateRateLimitInfo()
 	state.Get().PrintRateLimit()
@@ -301,14 +339,71 @@ func RunWithContext(ctx context.Context, config Config) error {
 		}
 	}
 
-	pterm.Success.Printf("✓ All data saved to %s\n", config.OutputFile)
+	// Add spacing before summary
+	pterm.Println()
 	ghapi.UpdateRateLimitInfo()
 	state.Get().PrintRateLimit()
-	state.Get().MarkDone()
+
+	// Calculate duration and mode
+	duration := time.Since(startTime)
+	mode := getModeName(config.DataFetchConfig)
+
+	state.Get().MarkDoneWithSummary(len(orgs), config.OutputFile, duration, mode, len(allErrors))
 	return nil
 }
 
-// filterProcessedRepos filters out already processed repositories and returns unprocessed ones
+// getModeName returns a human-readable name for the data fetch mode based on config.
+func getModeName(fetchConfig ghapi.DataFetchConfig) string {
+	// Count enabled features using a slice
+	features := []bool{
+		fetchConfig.FetchSettings,
+		fetchConfig.FetchCustomProps,
+		fetchConfig.FetchBranches,
+		fetchConfig.FetchWebhooks,
+		fetchConfig.FetchAutolinks,
+		fetchConfig.FetchActions,
+		fetchConfig.FetchSecurity,
+		fetchConfig.FetchPages,
+		fetchConfig.FetchIssuesData,
+		fetchConfig.FetchPRsData,
+		fetchConfig.FetchTraffic,
+		fetchConfig.FetchTags,
+		fetchConfig.FetchGitRefs,
+		fetchConfig.FetchLFS,
+		fetchConfig.FetchFiles,
+		fetchConfig.FetchContributors,
+		fetchConfig.FetchCommits,
+		fetchConfig.FetchIssueEvents,
+		fetchConfig.FetchCollaborators,
+		fetchConfig.FetchLanguages,
+		fetchConfig.FetchTopics,
+		fetchConfig.FetchLicense,
+		fetchConfig.FetchDeployKeys,
+		fetchConfig.FetchEnvironments,
+		fetchConfig.FetchDeployments,
+	}
+
+	enabledCount := 0
+	for _, enabled := range features {
+		if enabled {
+			enabledCount++
+		}
+	}
+
+	totalFeatures := len(features)
+
+	// Determine mode based on enabled count
+	if enabledCount == 0 {
+		return "Minimal"
+	} else if enabledCount < totalFeatures/3 {
+		return "Minimal"
+	} else if enabledCount < (totalFeatures*2)/3 {
+		return "Partial"
+	}
+	return "Full"
+}
+
+// filterProcessedRepos filters out already processed repositories and returns unprocessed ones.
 func filterProcessedRepos(allRepoNames []string, org string, existingStats map[string]output.RepoStats, config Config) ([]string, int) {
 	unprocessedRepoNames := make([]string, 0, len(allRepoNames))
 	skippedCount := 0
@@ -332,33 +427,37 @@ func filterProcessedRepos(allRepoNames []string, org string, existingStats map[s
 	// Update total repos (only count unprocessed ones)
 	state.Get().AddRepos(len(unprocessedRepoNames))
 
-	if config.Verbose {
-		pterm.Info.Printf("Found %d repositories in %s (%d new, %d already processed)\n",
-			len(allRepoNames), org, len(unprocessedRepoNames), skippedCount)
-	}
+	// Print repository discovery information
+	output.PrintRepoDiscovery(output.RepoDiscovery{
+		Total:           len(allRepoNames),
+		New:             len(unprocessedRepoNames),
+		AlreadyDone:     skippedCount,
+		SkippedPackages: config.NoPackages,
+		SkippedTeams:    config.NoTeams,
+	})
 
 	return unprocessedRepoNames, skippedCount
 }
 
-// loadExistingPackageData loads existing package data (automatically resumes if file exists)
+// loadExistingPackageData loads existing package data (automatically resumes if file exists).
 func loadExistingPackageData(org string, config Config, outputFile string) map[string]output.PackageCounts {
 	// Always try to load existing package data for automatic resume
 	existingPackageCounts, err := output.ReadPackageDataJSON(outputFile)
 	if err != nil {
-		if config.Resume {
-			pterm.Warning.Printf("Failed to read existing package data for %s: %v\n", org, err)
+		if config.Verbose {
+			pterm.Debug.Printf("No existing package data for %s: %v\n", org, err)
 		}
 		return nil
 	}
 
-	if len(existingPackageCounts) > 0 {
-		pterm.Info.Printf("Found existing package data for %s (%d repositories, will reuse)\n", org, len(existingPackageCounts))
+	if len(existingPackageCounts) > 0 && config.Verbose {
+		pterm.Info.Printf("📦 Resuming: Found package data for %d repositories\n", len(existingPackageCounts))
 	}
 
 	return existingPackageCounts
 }
 
-// fetchPackageData fetches package data for the organization and returns both counts and raw package data
+// fetchPackageData fetches package data for the organization and returns both counts and raw package data.
 func fetchPackageData(ctx context.Context, org string, existingPackageCounts map[string]output.PackageCounts, config Config, outputFile string) (map[string]output.PackageCounts, []output.PackageData) {
 	// Skip package fetching if --no-packages flag is set
 	if config.NoPackages {
@@ -368,7 +467,7 @@ func fetchPackageData(ctx context.Context, org string, existingPackageCounts map
 		return make(map[string]output.PackageCounts), []output.PackageData{}
 	}
 
-	// Always fetch package data (with resume support if enabled)
+	// Always fetch package data (with automatic resume if existing data found)
 	packageProgress, _ := pterm.DefaultProgressbar.WithTotal(6).WithTitle("Fetching packages...").Start()
 
 	packageStart := time.Now()
@@ -389,16 +488,48 @@ func fetchPackageData(ctx context.Context, org string, existingPackageCounts map
 		if err := output.AppendToConsolidatedJSON(outputFile, nil, nil, rawPackages); err != nil {
 			pterm.Warning.Printf("Failed to save package data for %s: %v\n", org, err)
 		} else {
-			pterm.Info.Printf("Saved %d packages to %s\n", len(rawPackages), outputFile)
+			// Calculate package type breakdown and total versions
+			typeBreakdown := make(map[string]int)
+			totalVersions := 0
+
+			for _, pkg := range rawPackages {
+				typeBreakdown[pkg.PackageType]++
+				if pkg.VersionCount != nil {
+					totalVersions += *pkg.VersionCount
+				}
+			}
+
+			// Add spacing before summary
+			pterm.Println()
+
+			// Fancy package summary with emoji (INFO for less visual weight)
+			pterm.Info.Printf("📦 Package Summary\n")
+			pterm.Info.Printf("   ├─ Total: %d packages (%d versions)\n", len(rawPackages), totalVersions)
+
+			// Show breakdown by type
+			typeCount := 0
+			for pkgType, count := range typeBreakdown {
+				typeCount++
+				if typeCount == len(typeBreakdown) {
+					pterm.Info.Printf("   └─ %s: %d\n", pkgType, count)
+				} else {
+					pterm.Info.Printf("   ├─ %s: %d\n", pkgType, count)
+				}
+			}
+
+			// Now print completion message
+			pterm.Println()
+			pterm.Success.Println("✅ Package fetching complete")
 		}
 	}
 
 	return packageData, rawPackages
 }
 
-// processRepositories processes the repositories and returns statistics and errors
+// processRepositories processes the repositories and returns statistics and errors.
 func processRepositories(ctx context.Context, org string, repoNames []string, packageData map[string]output.PackageCounts, teamAccessMap map[string][]output.RepoTeamAccess, config Config, outputFile string) ([]output.RepoStats, []error) {
 	if len(repoNames) == 0 {
+		pterm.Println()
 		pterm.Info.Printf("All repositories in %s have already been processed\n", org)
 		return []output.RepoStats{}, []error{}
 	}
@@ -420,7 +551,8 @@ func processRepositories(ctx context.Context, org string, repoNames []string, pa
 	return processReposParallel(ctx, org, repoNames, packageData, teamAccessMap, repoProgress, config, outputFile)
 }
 
-// processOrg processes a single organization and returns statistics, packages, and errors
+// processOrg processes a single organization and returns statistics, packages, and errors.
+// This is the core implementation that orchestrates fetching packages, team access, and repository data.
 func processOrg(ctx context.Context, org string, config Config, existingStats map[string]output.RepoStats, outputFile string) ([]output.RepoStats, []output.PackageData, []error, error) {
 	// Fetch all repository names for this organization
 	allRepoNames, err := ghapi.FetchRepositoryNames(ctx, org)
@@ -431,26 +563,35 @@ func processOrg(ctx context.Context, org string, config Config, existingStats ma
 	// Filter out already processed repositories
 	repoNames, _ := filterProcessedRepos(allRepoNames, org, existingStats, config)
 
-	// Load existing package data if resume is enabled
+	// Load existing package data if file exists (automatic resume)
 	existingPackageCounts := loadExistingPackageData(org, config, outputFile)
 
 	// Fetch package data for the organization (saves immediately)
 	packageData, rawPackages := fetchPackageData(ctx, org, existingPackageCounts, config, outputFile)
 
-	// Fetch team access data once for the entire org
-	if config.Verbose {
-		pterm.Info.Println("Fetching team access data for organization...")
-	}
-	teamAccessMap, err := ghapi.FetchOrgTeamsAccess(ctx, org, config.Verbose)
-	if err != nil {
-		pterm.Warning.Printf("Failed to fetch team access data: %v (will fetch per-repo instead)\n", err)
-		teamAccessMap = nil // Will fall back to per-repo fetching
-	} else if config.Verbose {
-		totalTeams := 0
-		for _, teams := range teamAccessMap {
-			totalTeams += len(teams)
+	// Fetch team access data once for the entire org (unless disabled)
+	var teamAccessMap map[string][]output.RepoTeamAccess
+	if config.NoTeams {
+		if config.Verbose {
+			pterm.Info.Println("Skipping team access data fetch (--no-teams flag set)")
 		}
-		pterm.Info.Printf("Loaded team access for %d repositories\n", len(teamAccessMap))
+		teamAccessMap = nil
+	} else {
+		if config.Verbose {
+			pterm.Info.Println("Fetching team access data for organization...")
+		}
+		var err error
+		teamAccessMap, err = ghapi.FetchOrgTeamsAccess(ctx, org, config.Verbose)
+		if err != nil {
+			pterm.Warning.Printf("Failed to fetch team access data: %v (will fetch per-repo instead)\n", err)
+			teamAccessMap = nil // Will fall back to per-repo fetching
+		} else if config.Verbose {
+			totalTeams := 0
+			for _, teams := range teamAccessMap {
+				totalTeams += len(teams)
+			}
+			pterm.Info.Printf("Loaded team access for %d repositories\n", len(teamAccessMap))
+		}
 	}
 
 	// Debug: Show package data stats
@@ -522,39 +663,68 @@ func calculateEstimatedAPICalls(config Config) int {
 // printDryRunHeader prints the dry run mode header and organization list.
 func printDryRunHeader(orgs []string, config Config) {
 	pterm.Info.Println("🔍 DRY RUN MODE - No API calls will be made")
-	fmt.Println()
+	pterm.Println()
 
 	pterm.Info.Printf("📋 Would process %d organization(s):\n", len(orgs))
 	for i, org := range orgs {
 		pterm.Info.Printf("  %d. %s\n", i+1, org)
 	}
-	fmt.Println()
+	pterm.Println()
 
 	pterm.Info.Println("⚙️  Configuration:")
 	pterm.Info.Printf("  Output file: %s\n", config.OutputFile)
 	pterm.Info.Printf("  Max workers: %d\n", config.MaxWorkers)
-	pterm.Info.Printf("  Resume mode: %v\n", config.Resume)
-	fmt.Println()
+	pterm.Println()
 }
 
 // printDryRunDataPoints prints what data would be collected.
 func printDryRunDataPoints(config Config) {
 	pterm.Info.Println("📊 Data to be collected:")
+	pterm.Println()
 
-	dataPoints := []struct {
+	// Organization-level data
+	pterm.Info.Println("  Organization metadata:")
+	pterm.Info.Println("    ✓ Basic organization info")
+	printFeatureStatus("Package data", !config.NoPackages)
+	pterm.Println()
+
+	// GraphQL data (single query per repo)
+	pterm.Info.Println("  Repository data (GraphQL):")
+	pterm.Info.Println("    ✓ Base fields (metadata, counts, feature flags)")
+
+	graphqlFeatures := []struct {
 		name    string
 		enabled bool
 	}{
-		{"Repository metadata (GraphQL)", true},
-		{"Organization metadata", true},
-		{"Package data", !config.NoPackages},
+		{"Collaborators list", config.FetchCollaborators},
+		{"Language breakdown", config.FetchLanguages},
+		{"Topics", config.FetchTopics},
+		{"License info", config.FetchLicense},
+		{"Deploy keys", config.FetchDeployKeys},
+		{"Environments", config.FetchEnvironments},
+		{"Deployments", config.FetchDeployments},
+		{"Milestones", config.FetchMilestones},
+		{"Releases", config.FetchReleases},
+		{"Community files", config.FetchCommunityFiles},
+		{"Rulesets", config.FetchRulesets},
+		{"Branch protection rules", config.FetchBranchProtection},
+	}
+	printFeatureList(graphqlFeatures)
+	pterm.Println()
+
+	// REST API data (multiple calls per repo)
+	pterm.Info.Println("  Repository data (REST API):")
+	restFeatures := []struct {
+		name    string
+		enabled bool
+	}{
 		{"Repository settings", config.FetchSettings},
 		{"Custom properties", config.FetchCustomProps},
-		{"Branch protection", config.FetchBranches},
+		{"Branch details", config.FetchBranches},
 		{"Webhooks", config.FetchWebhooks},
 		{"Autolinks", config.FetchAutolinks},
-		{"GitHub Actions (workflows, secrets, variables, runners, cache)", config.FetchActions},
-		{"Security (Dependabot, code scanning, secret scanning)", config.FetchSecurity},
+		{"GitHub Actions", config.FetchActions},
+		{"Security scanning", config.FetchSecurity},
 		{"GitHub Pages", config.FetchPages},
 		{"Issues metadata", config.FetchIssuesData},
 		{"Pull requests metadata", config.FetchPRsData},
@@ -567,16 +737,28 @@ func printDryRunDataPoints(config Config) {
 		{"Commit count", config.FetchCommits},
 		{"Issue events count", config.FetchIssueEvents},
 	}
+	printFeatureList(restFeatures)
+	pterm.Println()
+}
 
-	for _, dp := range dataPoints {
-		if dp.enabled {
-			pterm.Info.Printf("  ✓ %s\n", dp.name)
-		} else {
-			grayText := pterm.NewStyle(pterm.FgLightWhite).Sprintf("✗ %s (disabled)", dp.name)
-			pterm.Info.Printf("  %s\n", grayText)
-		}
+// printFeatureStatus prints a single feature status line with appropriate styling.
+func printFeatureStatus(name string, enabled bool) {
+	if enabled {
+		pterm.Info.Printf("    ✓ %s\n", name)
+	} else {
+		grayText := pterm.NewStyle(pterm.FgLightWhite).Sprintf("✗ %s (disabled)", name)
+		pterm.Info.Printf("    %s\n", grayText)
 	}
-	fmt.Println()
+}
+
+// printFeatureList prints a list of features with their status.
+func printFeatureList(features []struct {
+	name    string
+	enabled bool
+}) {
+	for _, feature := range features {
+		printFeatureStatus(feature.name, feature.enabled)
+	}
 }
 
 // runDryRun shows what would be collected without making API calls.
@@ -594,12 +776,12 @@ func runDryRun(config Config) error {
 	pterm.Warning.Println("⚠️  Estimated API usage:")
 	pterm.Warning.Printf("  ~%d API calls per repository\n", apiCallsPerRepo)
 	pterm.Warning.Println("  Plus: ~3-5 calls per organization")
-	fmt.Println()
+	pterm.Println()
 	pterm.Warning.Println("  Note: Actual usage may vary based on:")
 	pterm.Warning.Println("    - Number of workflows, secrets, branches, etc.")
 	pterm.Warning.Println("    - Pagination requirements for large datasets")
 	pterm.Warning.Println("    - Rate limit throttling and retries")
-	fmt.Println()
+	pterm.Println()
 
 	pterm.Success.Println("✓ Dry run complete. Remove --dry-run flag to start actual collection.")
 	return nil
