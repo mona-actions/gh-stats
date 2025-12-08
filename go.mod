@@ -4,7 +4,7 @@ go 1.24.5
 
 require (
 	github.com/pterm/pterm v0.12.82
-	github.com/spf13/cobra v1.10.1
+	github.com/spf13/cobra v1.10.2
 )
 
 require (
